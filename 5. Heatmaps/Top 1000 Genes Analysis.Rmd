@@ -1,0 +1,257 @@
+---
+title: "Top 1000 Genes Analysis"
+author: "Timothy Smyth"
+date: "2024-03-27"
+output: html_document
+---
+
+# Top 1000 Genes Analysis
+
+This file generates a principal component analysis plot and heatmap visualizing gene expression patterns of M0 and M1 macrophages using the top 1000 genes as determined by random forest permutation importance.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Environment setup
+
+```{r message = FALSE}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+library(tibble)
+library(tidyverse)
+library(dplyr) 
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(circlize)
+library(digest)
+library(cluster)
+library(factoextra)
+library(parallelpam)
+```
+
+### Load data and generate PCA plot
+
+```{r}
+# Load data
+load('Top_1000_RF_Genes.RData')
+
+# Save metadata
+info <- MDM_df[1:3]
+
+# Retain only top 1000 genes by variance
+MDM_df <- MDM_df[, top_1000]
+
+######### PCA ######### 
+
+# Run PCA
+pca.res <- prcomp(MDM_df, center = TRUE, scale = TRUE)
+
+# Set theme
+theme_set(theme_bw())
+
+# Set colors
+col2 <- c('blue',          
+          'gray70',
+          'skyblue2',
+          'maroon2')
+
+info$polarization <- factor(info$polarization, 
+                            levels = c('M0', 'M1', 'M2'))
+
+info$ID <- factor(info$ID,
+                    levels = c('M0', 
+                               'IFN', 'LPS', 'LPS_IFN',
+                               'IL4', 'IL10', 'IL13', 'IL4_IL13'))
+
+# All groups cluster plot
+fviz_pca_ind(pca.res,
+             label = "none",
+             habillage = info$ID,
+             palette = col2,
+             addEllipses = TRUE,
+             ellipse.alpha = 0.15,
+             point.size = 0.5) + 
+  
+  ggtitle("PCA - Clustering") +
+  ylim(-20, 20) +
+  
+  theme(axis.title = element_text(size = 14), 
+        axis.text = element_text(size = 12), 
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        panel.border = element_rect(fill = NA, color = "black", size = 0.3),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank()) 
+```
+
+### Perform partition around medoid (PAM) clustering for samples and genes
+
+```{r}
+# Partitioning around medoids using parallelpam for samples
+parallelpam::JWriteBin(as.matrix(t(scale(t(MDM_df)))),
+                       "MDM_results_group.bin",
+                       dtype = "float",
+                       dmtype = "full")
+
+CalcAndWriteDissimilarityMatrix("MDM_results_group.bin", 
+                                "MDM_results_group2.bin",
+                                distype = "L2", 
+                                restype = "float",
+                                comment = "L2 distance for vectors in jmatrix file vst_results_group.bin", 
+                                nthreads = 8)
+
+JMatInfo("MDM_results_group2.bin")
+
+MDM_results_group_pam = ApplyPAM("MDM_results_group2.bin", 
+                                 k = 4, # by polarization method
+                                 init_method = "BUILD", 
+                                 max_iter = 1000, 
+                                 nthreads = 8)
+
+#################################################################################
+
+# Partitioning around medoids using parallelpam for genes
+parallelpam::JWriteBin(as.matrix(t(scale(MDM_df))),
+                       "MDM_results.bin",
+                       dtype = "float",
+                       dmtype = "full")
+
+CalcAndWriteDissimilarityMatrix("MDM_results.bin", 
+                                "MDM_results2.bin",
+                                distype = "L2", 
+                                restype = "float",
+                                comment = "L2 distance for vectors in jmatrix file vst_results.bin", 
+                                nthreads = 8)
+
+JMatInfo("MDM_results2.bin")
+
+MDM_results_pam = ApplyPAM("MDM_results2.bin", 
+                           k = 4,
+                           init_method = "BUILD", 
+                           max_iter = 1000, 
+                           nthreads = 8)
+```
+
+### Generate heatmap using results of PAM clustering
+
+```{r}
+# Scale results
+heat <- scale(MDM_df)
+
+pol_level <- paste0('Cluster ', seq_along(1:max(MDM_results_group_pam$clasif)))
+
+levels <- paste0('Cluster ', seq_along(1:max(MDM_results_pam$clasif)))
+
+# Define clusters calculated above for sorting
+MDM_results_group_pam$clasif <- paste0('Cluster ', MDM_results_group_pam$clasif)
+MDM_results_pam$clasif <- paste0('Cluster ', MDM_results_pam$clasif)
+
+# Fix order of the clusters to have 1 to 4, top to bottom
+MDM_results_group_pam$clasif <- factor(MDM_results_group_pam$clasif,
+                                 levels = pol_level)
+
+MDM_results_pam$clasif <- factor(MDM_results_pam$clasif,
+                                 levels = levels)
+
+# Set color palette
+myCol <- colorRamp2(c(-2, 0, 2), hcl_palette = "Vik")
+
+# Create annotation data frame
+annotation <- data.frame(
+  ID = info$ID, 
+  Polarization = info$polarization,
+  stringsAsFactors = FALSE)
+
+colors <- list(
+  ID = c('M0' = 'blue', 
+         'LPS' = 'skyblue2',
+         'IFN' = 'gray70',
+         'LPS_IFN' = 'maroon2'),
+  
+  Polarization = c('M0' = 'blue', 
+                   'M1' = 'red'))
+
+# Define column annotation
+colAnn <- HeatmapAnnotation(
+  df = annotation,
+  which = 'col', # 'col' (samples) or 'row' (gene) annotation
+  col = colors,
+  annotation_height = 0.6,
+  annotation_width = unit(1, 'cm'),
+  gap = unit(1, 'mm'),
+  annotation_legend_param = list(
+    Polarization = list(
+      nrow = 2, # number of rows across which the legend will be arranged
+      title = 'Polarization',
+      title_position = 'topcenter',
+      legend_direction = 'vertical',
+      title_gp = gpar(fontsize = 10, fontface = 'bold'),
+      labels_gp = gpar(fontsize = 10, fontface = 'bold'))))
+
+heatmap <- Heatmap(t(heat),
+
+                 # split the genes / rows according to the PAM clusters
+                 row_split = MDM_results_pam$clasif,
+                 column_split = MDM_results_group_pam$clasif,
+                 cluster_row_slices = FALSE,
+                 row_gap = unit(2.5, "mm"),
+                 column_gap = unit(2.5, 'mm'),
+                 border = TRUE,
+
+                 name = 'Gene\nZ-Score\ ',
+
+                 col = myCol,
+
+                 # parameters for the color-bar that represents gradient of expression
+                 heatmap_legend_param = list(
+                   color_bar = 'continuous',
+                   legend_direction = 'horizontal',
+                   legend_width = unit(25, 'cm'),
+                   legend_height = unit(25.0, 'cm'),
+                   title_position = 'topcenter',
+                   title_gp = gpar(fontsize = 24, fontface = 'bold'),
+                   labels_gp = gpar(fontsize = 24, fontface = 'bold')),
+
+                 # row (gene) parameters
+                 cluster_rows = TRUE,
+                 show_row_dend = TRUE,
+                 row_title_side = 'left',
+                 row_title_gp = gpar(fontsize = 24,  fontface = 'bold'),
+                 row_title_rot = 0,
+                 show_row_names = FALSE,
+                 row_dend_width = unit(25,'mm'),
+
+                 # column (sample) parameters
+                 cluster_columns = TRUE,
+                 show_column_dend = TRUE,
+                 column_title = '',
+                 column_title_side = 'bottom',
+                 column_title_gp = gpar(fontsize = 24, fontface = 'bold'),
+                 column_title_rot = 45,
+                 show_column_names = FALSE,
+                 column_dend_height = unit(25,'mm'),
+
+                 # cluster methods for rows and columns
+                 clustering_distance_columns = function(x) as.dist(1 - cor(t(x))),
+                 clustering_method_columns = 'ward.D2',
+                 clustering_distance_rows = function(x) as.dist(1 - cor(t(x))),
+                 clustering_method_rows = 'ward.D2',
+
+                 # specify top and bottom annotations
+                 top_annotation = colAnn)
+
+png(file = "Heatmap.png", height = 1250, width = 2000)
+
+start.time <- Sys.time()
+
+draw(heatmap,
+     heatmap_legend_side = 'bottom',
+     annotation_legend_side = 'top')
+
+end.time <- Sys.time()
+a <- end.time - start.time
+a
+
+dev.off()
+```
+

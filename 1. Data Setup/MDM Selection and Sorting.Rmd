@@ -1,0 +1,1656 @@
+---
+title: "MDM Selection and Sorting"
+author: "Timothy Smyth"
+date: "2024-03-27"
+output: html_document
+---
+
+# Selection of Monocyte-Derived Macrophages and Sorting by Polarization Method
+
+## This file performs the process of downloading the ARCHS4 database and isolating monocyte-derived macrophages from other cell types. Assignment of polarization state (unpolarized M0, pro-inflammatory M1, or pro-resolutory M2) and polarization method according to metadata labels and descriptions available from the Gene Expression Omnibus (GEO) website is also conducted.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Environment setup
+
+```{r message = FALSE}
+rm(list = ls(all.names = TRUE)) # clears global environ
+
+library(rhdf5)
+library(dplyr)
+library(stringr)
+library(tidyverse)
+library(tibble)
+```
+
+### If it is not downloaded, download of the ARCHS4 database and extract sample metadata
+
+```{r}
+# Check for ARCHS4 data set and download if file not present
+# Code sourced from ARCHS4 tutorial at: https://maayanlab.cloud/archs4/help.html
+
+destination_file = "human_gene_v2.2.h5" # Originally accessed on Oct_13_2023
+extracted_expression_file = "macrophage_expression_matrix.tsv"
+url = "https://s3.dev.maayanlab.cloud/archs4/files/human_gene_v2.2.h5" # Version number updates periodically
+
+# Check if gene expression file was already downloaded, if not in current directory download file form repository
+if(!file.exists(destination_file)){
+  print("Downloading compressed gene expression matrix.")
+  download.file(url, destination_file, quiet = FALSE, mode = 'wb')
+}
+
+# Retrieve information from compressed data
+Samples = as.data.frame(h5read(destination_file, '/meta/samples'))
+
+# Isolate useful columns
+row.names(Samples) = Samples$geo_accession
+Samples <- Samples[, c(2, 9:12, 17, 22:25, 29)]
+```
+
+### Isolate macrophages and monocytes
+
+```{r}
+# Create ID column for manipulation
+Samples$ID <- NA
+Samples <- Samples %>% select(ID, everything())
+Samples <- as.data.frame(Samples)
+
+# Create a list with names to ID
+list <- list('acrophage', 
+             'MDM', 
+             'onocyte')
+
+# Search every column for matching names from list
+Macrophage <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Samples <- Samples %>% mutate(ID = 
+                                  case_when(str_detect(characteristics_ch1, x) | 
+                                              str_detect(source_name_ch1, x) |
+                                              str_detect(title, x) |
+                                              str_detect(series_id, x) ~ 'Macrophage', 
+                                            
+                                            TRUE ~ as.character(.$ID)))
+  
+  Samples <- Samples %>% subset(ID == 'Macrophage')
+  
+})
+
+# Combine data into one location
+Macrophage <- unique(do.call(rbind, Macrophage))
+```
+
+### Perform initial filter
+
+Remove samples which are not monocyte-derived macrophages and then recover samples which were improperly sorted by the first round of sample removal
+
+```{r}
+# Create a list with names to ID
+# This process is case sensitive so first letter often dropped
+# and is focused on broadly removing non-primary, non-MDM samples
+list <- list('angerhans',
+             'arcinoma', 
+             'arcoma', 
+             'BAL', 
+             'bariatric', 
+             'brain', 
+             'cell line', 
+             'CMML', 
+             'co culture',
+             'co-culture',
+             'Co culture',
+             'Co-culture',
+             'cord',
+             'cornea',
+             'DCs', 
+             'endritic', 
+             'ermal', 
+             'ESC', 
+             'eukemia', 
+             'FCS)', 
+             'hepatic', 
+             'HL60', 
+             'HL-60', 
+             'icroglia', 
+             'idney', 
+             'intestinal', 
+             'iPSC', 
+             'IPSDM',
+             'iPSM', 
+             'irway', 
+             'iver', 
+             'lavage', 
+             'lveolar', 
+             'marrow', 
+             'olonic', 
+             'pithelia', 
+             'pleen',
+             'Q Fever',
+             'Q fever',
+             'scites',
+             'scleroderma',
+             'stem', 
+             'steoclast',
+             'THP', 
+             'Tonsil',
+             'umor')
+
+# Search every column for matching names from list
+Removed_Macrophage <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Macrophage <- Macrophage %>% mutate(ID = 
+                                        case_when(str_detect(characteristics_ch1, x) | 
+                                                    str_detect(source_name_ch1, x) |
+                                                    str_detect(title, x) |
+                                                    str_detect(series_id, x) ~ 'Not_MDM', 
+                                                  
+                                                  TRUE ~ as.character(.$ID)))
+  
+  Macrophage <- Macrophage %>% subset(ID == 'Not_MDM')
+  
+})
+
+# Combine data into one location
+Removed_Macrophage <- unique(do.call(rbind, Removed_Macrophage))
+
+##################### Recover Misfiltered Samples #####################   
+
+# Create a list with names to ID
+list <- list('cell line: primary', 
+             'cell line: Primary')
+
+# Search every column for matching names from list
+Recovered_Macrophage <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Removed_Macrophage <- Removed_Macrophage %>% mutate(ID = 
+                                                        case_when(str_detect(characteristics_ch1, x) | 
+                                                                    str_detect(source_name_ch1, x) |
+                                                                    str_detect(title, x) |
+                                                                    str_detect(series_id, x) ~ 'Macrophage', 
+                                                                  
+                                                                  TRUE ~ as.character(.$ID)))
+  
+  Removed_Macrophage <- Removed_Macrophage %>% subset(ID == 'Macrophage')
+  
+})
+
+# Combine data into one location
+Recovered_Macrophage <- unique(do.call(rbind, Recovered_Macrophage))
+
+# Remove recovered samples from removed
+Removed_Macrophage <- anti_join(Removed_Macrophage, Recovered_Macrophage, by = 'geo_accession')
+
+# Remove corrected removed macrophages from total macrophages
+Macrophage <- anti_join(Macrophage, Removed_Macrophage, by = 'geo_accession')
+```
+
+### Isolate monocyte-derived macrophages
+
+```{r}
+# Create a list with names to ID
+list <- list('CD14-derived', 
+             '-derived macrophage',
+             'human primary macrophages', 
+             'M0', 
+             'M1', 
+             'M2', 
+             'MCSF', 
+             'mcsf', 
+             'M-CSF', 
+             'MDM', 
+             'onocyte d', 
+             'onocyte-d', 
+             'PMA', 
+             'polarize', 
+             'uman macrophage')
+
+# Search every column for matching names from list
+MDM <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Macrophage <- Macrophage %>% mutate(ID = 
+                                        case_when(str_detect(characteristics_ch1, x) | 
+                                                    str_detect(source_name_ch1, x) |
+                                                    str_detect(title, x) |
+                                                    str_detect(series_id, x) ~ 'MDM', 
+                                                  
+                                                  TRUE ~ as.character(.$ID)))
+  
+  Macrophage <- Macrophage %>% subset(ID == 'MDM')
+  
+})
+
+# Combine data into one location
+MDM <- unique(do.call(rbind, MDM))
+
+Not_MDM <- anti_join(Macrophage, MDM, by = 'geo_accession')
+
+################# Resort Not_MDMs #################
+
+# Based on inspection of 'Not_MDM' and affiliated GEO pages, following key words
+# used to identify MDMs for resorting
+list <- list('Adult Human Peripheral Blood', 
+             'blood-derived macrophage', 
+             'cell type: Macrophage,treatment: ', 
+             'cell type: Macrophages,treatment: Unstimulated',
+             'cell type: macrophage,treatment: untreated',
+             'cell type: primary macrophages,treatment: none', 
+             'cell type: primary macrophages,treatment: TNF', 
+             'Control macrophage', 
+             'differentiating monocyte', 
+             'disease: mock', 
+             'Healthy donors,antibody: macrophage', 
+             'Human macrophages MF', 
+             'individual: AF', 
+             'individual: EU', 
+             'Macrophage in Normoxia', 
+             'macrophage,precursor: CD14+ monocyte', 
+             'macrophages derived from CD14+ monocytes', 
+             'Macrophages(BC', 
+             'PBMC derived macrophage', 
+             'peripheral blood monocytes derived macrophages', 
+             'Primary macrophages differentiated from cd14+ monocytes', 
+             'tissue: macrophage,genotype: wild type,phenotype: wild type', 
+             'tissue: peripheral blood,cell type: IL-10-APC', 
+             'treatment: IL-4,cell type: macrophages', 
+             'uman monocytes,donor number:')
+
+# Search every column for matching names from list
+Rescued_MDM <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Not_MDM <- Not_MDM %>% mutate(ID = 
+                                  case_when(str_detect(characteristics_ch1, x) | 
+                                              str_detect(source_name_ch1, x) |
+                                              str_detect(title, x) |
+                                              str_detect(series_id, x) ~ 'Rescue', 
+                                            
+                                            TRUE ~ as.character(.$ID)))
+  
+  Not_MDM <- Not_MDM %>% subset(ID == 'Rescue')
+  
+})
+
+# Combine data into one location
+Rescued_MDM <- unique(do.call(rbind, Rescued_MDM))
+
+MDM <- rbind(MDM, Rescued_MDM)
+
+MDM <- MDM %>% 
+  
+  mutate(ID = 
+           case_when(str_detect(ID, 'Rescue') ~ 'MDM', 
+                     
+                     TRUE ~ as.character(.$ID)))
+```
+
+### Isolate samples exposed to bacterial and viral samples
+
+```{r}
+# Based on inspection of MDM group
+# Removing identified treatments and infections
+# Preserving related controls (unpolarized and polarized vehicle/mock infection treatments)
+list <- list('agent: BCG', 
+             'agent: GC',
+             'agent: Mycobacterium tuberculosis',
+             'agent: Rv',
+             'agent: Salm',
+             'agent: Smeg',
+             'agent: Staph',
+             'agent: Yers',
+             'Bacillus Calmette', 
+             'BDQ',
+             'H37Rv',
+             'infection: WT Group B Streptococcus',
+             'inf_with_Staph',
+             'L. pneumophila',
+             'Listeria',
+             'Salmonella',
+             'treatment: BCG', 
+             'treatment: S_typh',
+             'treatment_protocol: BCG Bulgaria',
+             'treatment_protocol: BCG Denmark',
+             'uberculosis')
+
+# Search every column for matching names from list
+Bacterial <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  MDM <- MDM %>% mutate(ID = 
+                          case_when(str_detect(characteristics_ch1, x) | 
+                                      str_detect(source_name_ch1, x) |
+                                      str_detect(title, x) |
+                                      str_detect(series_id, x) ~ 'Bacterial', 
+                                    
+                                    TRUE ~ as.character(.$ID)))
+                                  
+  MDM <- MDM %>% subset(ID == 'Bacterial')
+  
+})
+
+# Combine data into one location
+Bacterial <- unique(do.call(rbind, Bacterial))
+
+Not_Bacterial <- anti_join(MDM, Bacterial, by = 'geo_accession')
+
+################# Remove Treatments #################
+
+# Based on inspection of MDM group
+# Removing identified treatments and infections
+# Preserving related controls (unpolarized and polarized vehicle/mock infection treatments)
+list <- list('ATRA',
+             'EC23',
+             'infection status: uninfected',
+             'Restim',
+             'treatment: AMK',
+             'treatment: EMB',
+             'treatment: INH', 
+             'treatment: PZA',
+             'treatment: RIF',
+             'treatment status: BDQ',
+             'TTNPB', 
+             'GSE145862')
+
+# Search every column for matching names from list
+Remove_Bacterial <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Bacterial <- Bacterial %>% mutate(ID = 
+                          case_when(str_detect(characteristics_ch1, x) | 
+                                      str_detect(source_name_ch1, x) |
+                                      str_detect(title, x) |
+                                      str_detect(series_id, x) ~ 'Remove', 
+                                    
+                                    TRUE ~ as.character(.$ID)))
+  
+  Bacterial <- Bacterial %>% subset(ID == 'Remove')
+  
+})
+
+# Combine data into one location
+Remove_Bacterial <- unique(do.call(rbind, Remove_Bacterial))
+
+Bacterial <- anti_join(Bacterial, Remove_Bacterial, by = 'geo_accession')
+
+################# Sort Viral #################
+
+# Based on inspection of MDM group
+# Removing identified treatments and infections
+# Preserving related controls (unpolarized and polarized vehicle/mock infection treatments)
+list <- list('agent: Rv',
+             'Chikungunya', 
+             'dengue',
+             'EBOV',
+             'H1N1', 
+             'H3N2', 
+             'H5N1', 
+             'HIV infected',
+             'HIV-Infected',
+             'HIVADA',
+             'HIV-infected', 
+             'HIV-Positive', 
+             'hiv-1 infection status: Infected',
+             'HRV1A',
+             'HRV16',
+             'infection: SARS-CoV-2', 
+             'SARS-CoV-2 infected',
+             'Treatment: HIV', 
+             'treatment: RESTV,',
+             'virus',
+             'ZIKV', 
+             'GSE180273', 
+             'treatment: 7 days of HIV infection')
+
+# Search every column for matching names from list
+Viral <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Not_Bacterial <- Not_Bacterial %>% mutate(ID = 
+                                              case_when(str_detect(characteristics_ch1, x) | 
+                                                          str_detect(source_name_ch1, x) |
+                                                          str_detect(title, x) |
+                                                          str_detect(series_id, x) ~ 'Viral', 
+                                                        
+                                                        TRUE ~ as.character(.$ID)))
+  
+  Not_Bacterial <- Not_Bacterial %>% subset(ID == 'Viral')
+  
+})
+
+# Combine data into one location
+Viral <- unique(do.call(rbind, Viral))
+
+################# Remove Treatments #################
+
+# Based on inspection of MDM group
+# Removing identified treatments and infections
+# Preserving related controls (unpolarized and polarized vehicle/mock infection treatments)
+list <- list('adenovirus: AdGFP',
+             'adenovirus: AdMAF',
+             'dengue+antibody',
+             'EBOV/LPS',
+             'ES-derived macrophage',
+             'GSE116672', # Monocytes
+             'GSE157884', # Serum from HIV infected donors
+             'GSE85243,GSE85246',
+             'hMDM_Methamphetamine',
+             'hsa+ or hsa-: Not infected',
+             'infection: uninfected (mock control)',
+             'treated with: anti-prM dengue protein',
+             'treatment: vitamin D')
+
+# Search every column for matching names from list
+Remove_Viral <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Viral <- Viral %>% mutate(ID = 
+                              case_when(str_detect(characteristics_ch1, x) | 
+                                          str_detect(source_name_ch1, x) |
+                                          str_detect(title, x) |
+                                          str_detect(series_id, x) ~ 'Remove', 
+                                        
+                                        TRUE ~ as.character(.$ID)))
+                                      
+  Viral <- Viral %>% subset(ID == 'Remove')
+  
+})
+
+# Combine data into one location
+Remove_Viral <- unique(do.call(rbind, Remove_Viral))
+
+Viral <- anti_join(Viral, Remove_Viral, by = 'geo_accession')
+
+Infected <- rbind(Bacterial, Viral)
+
+Infected <- Infected %>% mutate(Agent = str_c(ID,
+                                              characteristics_ch1, 
+                                              source_name_ch1, 
+                                              title, 
+                                              sep = " "))
+                                                       
+Infected <- Infected %>% select(Agent, everything())
+
+Infected <- Infected %>% mutate(Agent = 
+                                  case_when(str_detect(Agent, 'GC') |
+                                              str_detect(Agent, 'Rv') | 
+                                              str_detect(Agent, 'uberculosis') |
+                                              str_detect(Agent, 'BCG') |
+                                              str_detect(Agent, 'H37Rv') ~ 'Mycobacterium tuberculosis',
+                                            
+                                            str_detect(Agent, 'Salm') |
+                                              str_detect(Agent, 'S_typh') ~ 'Salmonella typhimurium',
+                                            
+                                            str_detect(Agent, 'Smeg') ~ 'Mycobacterium smegmatis',
+                                            
+                                            str_detect(Agent, 'Staph') ~ 'Staphylococcus epidermidis',
+                                            
+                                            str_detect(Agent, 'Yers') ~ 'Yersinia pseudotuberculosis',
+                                            
+                                            str_detect(Agent, 'Streptococcus') ~ 'Group B Streptococcus',
+                                            
+                                            str_detect(Agent, 'pneumophila') ~ 'L. pneumophila',
+                                            
+                                            str_detect(Agent, 'Listeria') ~ 'Listeria',
+                                            
+                                            ################################
+                                            
+                                            str_detect(Agent, 'CHIKV') ~ 'Chikungunya Virus',
+                                            
+                                            str_detect(Agent, 'EBOV') ~ 'Ebola Virus',
+                                            
+                                            str_detect(Agent, 'HRV') ~ 'Human Rhinovirus',
+                                            
+                                            str_detect(Agent, 'H1N1') |
+                                              str_detect(Agent, 'H3N2') |
+                                              str_detect(Agent, 'H5N1') ~ 'IAV',
+                                            
+                                            str_detect(Agent, 'HIV') |
+                                              str_detect(Agent, 'hiv') ~ 'HIV',
+                                            
+                                            str_detect(Agent, 'SARS-CoV-2') ~ 'SARS-CoV-2',
+                                            
+                                            str_detect(Agent, 'RESTV') ~ 'Reston Virus',
+                                            
+                                            str_detect(Agent, 'HCMV-TB40 virus') ~ 'Cytomegalovirus',
+                                            
+                                            str_detect(Agent, 'ZIKV') ~ 'Zika Virus',
+                                            
+                                            TRUE ~ as.character(.$Agent)))
+```
+
+### Extract count data for samples exposed to bacterial and viral agents
+
+```{r}
+destination_file = "human_gene_v2.2.h5"
+extracted_expression_file = "Infected_expression_matrix.tsv"
+
+# Selected samples to be extracted
+samp = as.character(row.names(Infected))
+
+# Retrieve information from compressed data
+samples = h5read(destination_file, "meta/samples/geo_accession")
+genes = h5read(destination_file, "meta/genes/ensembl_gene_id")
+
+# Identify columns to be extracted
+sample_locations = which(samples %in% samp)
+
+# extract gene expression from compressed data
+expression = t(h5read(destination_file, 
+                      "data/expression", 
+                      index = list(sample_locations, 
+                                   1:length(genes))))
+
+H5close()
+
+rownames(expression) = genes
+colnames(expression) = samples[sample_locations]
+
+# Print file
+write.table(expression, 
+            file = extracted_expression_file, 
+            sep = "\t", 
+            quote = FALSE, 
+            col.names = NA)
+
+print(paste0("Expression file was created at ", 
+             getwd(), 
+             "/", 
+             extracted_expression_file))
+
+# Import sorted MDMs and polarization ID
+Infected_df <- read_tsv('Infected_expression_matrix.tsv')
+
+names <- colnames(Infected_df[2:ncol(Infected_df)])
+
+Infected <- Infected[names, ]
+
+colnames(Infected_df)[1] <- 'Gene'
+
+Infected_df <- t(data.frame(Infected_df[2:length(Infected_df)], 
+                            row.names = Infected_df$Gene))
+
+Infected_df <- as.data.frame(cbind(Infected$Agent,
+                                   Infected$series_id,
+                                   Infected$ID, 
+                                   Infected_df))
+                                   
+colnames(Infected_df)[1:3] <- c('Agent', 'series_id', 'ID')
+
+# Save resulting data
+save(Infected_df, file = 'Infected.RData')
+save(Infected, file = 'Infected_Metadata.RData')
+```
+
+### Remove samples which were exposed to treatments such as chemical or infectious agents. Retain samples exposed to vehicle/mock treatments or major polarization stimuli.
+
+```{r}
+# Based on inspection of MDM group
+# Removing identified treatments and infections
+# Preserving related controls (unpolarized and polarized vehicle/mock infection treatments)
+list <- list(' Culture only, collected at', 
+             '_with_TGF-priming', 
+             '5Gy', 
+             'A2M',
+             'acetylated LDL',
+             'ACP', 
+             'ADIPOQ',
+             'agent: BCG', 
+             'agent: GC',
+             'agent: Glycerol gradient, fraction', 
+             'agent: Mycobacterium tuberculosis',
+             'agent: Rv',
+             'agent: Salm',
+             'agent: Smeg',
+             'agent: Staph',
+             'agent: Yers',
+             'Alprostadil',
+             'ALS mutations',
+             'AMK', 
+             'AMTB',
+             'ANGPT1',
+             'anti-IL-10 antibody', 
+             'antibody: k27ac',
+             'APOBEC3A siRNA', 
+             'APOE',
+             'Arcyriaflavin',
+             'ATRA',
+             'Atripla', 
+             'Atrovastatin',
+             'Axitinib',
+             'Bacillus Calmette', 
+             'BDQ',
+             'BD serum',
+             'Bintrafusp', 
+             'Bisantrene',
+             'BMP4',
+             'Bosutinib',
+             'Butyrate',
+             'C5',
+             'C9orf72 repeat',
+             'Cantharidin',
+             'CAR',
+             'CAR-HER2 Ad5f35', 
+             'CCL11',
+             'CCL12',
+             'CCL2',
+             'CCL3',
+             'CCL5',
+             'CD40LG',
+             'Chikungunya', 
+             'Cholesterol',
+             'CMScrambleASO',
+             'COL18A1',
+             'Control IgG2B',
+             'CSF1',
+             'CSF2',
+             'CS-NC',
+             'Cucurbitacin',
+             'culture condition: single,immunopathological ',
+             'CXCL12',
+             'Dasatinib',
+             'dengue',
+             'Diphenyleneiodonium',
+             'disease state: SARS-CoV-2 convalescent', 
+             'disease: Rheumatoid arthritis',
+             'disease state: Rheumatoid Arthritis',
+             'DLL1',
+             'DNMT3AASO', 
+             'Doublet', 
+             'EBOV',
+             'EMB', 
+             'Embelin', 
+             'Empty Ad5f35',
+             'endometriosis',
+             'EPO',
+             'ERG240', 
+             'Etanercept',
+             'Evodiamine',
+             'FASLG',
+             'Fatostatin',
+             'Fenbendazole',
+             'FDF1',
+             'FK506',
+             'FTC', 
+             'FTY720',
+             'fumigatus',
+             'GAPLINC', 
+             'Garcinol',
+             'GAS6',
+             'GdA', 
+             'GDF15',
+             'genotype: CD44 KO',
+             'genotype: CF,',
+             'genotype: IRF1-/- P2',
+             'genotype: SIMALR knockdown',
+             'GFP',
+             'GSE155697',
+             'GSE149377',
+             'GSE202286',
+             'GSE214751',
+             'GSE104149',
+             'GSE130353',
+             'GSE168468',
+             'GSE180693,GSE180694',
+             'GSE185433',
+             'GSE190529,GSE190530',
+             'GSE107821', 
+             'GSE109439,GSE109440',
+             'GSE118157', 
+             'GSE122267,GSE122269', 
+             'GSE131220',
+             'GSE166238', 
+             'GSE59364,GSE59365', 
+             'GSE85243,GSE85246',
+             'GSK2033', 
+             'GW3965', 
+             'GW9662',
+             'GW-843682X',
+             'H syndrome', 
+             'H1N1', 
+             'H37Rv',
+             'H3N2', 
+             'H5N1', 
+             'HC serum',
+             'Hemin',
+             'heterozygous',
+             'HIV infected',
+             'HIV-Infected',
+             'HIVADA',
+             'HIV-infected', 
+             'HIV-Positive', 
+             'HMN-214',
+             'HRV1A',
+             'HRV16', 
+             'HSA',
+             'H syndrome',
+             'Hypoxia', 
+             'IBET151',
+             'ifn-l', 
+             'IGF1',
+             'IL17A',
+             'IL1RN',
+             'IL22',
+             'IL26',
+             'IL33',
+             'IL7',
+             'Infected with lentiviral construct', 
+             'infected with', 
+             'infection: WT Group B Streptococcus',
+             'infection status: infected,',
+             'infection: SARS-CoV-2', 
+             'inf_with_Staph',
+             'INH', 
+             'INHBB',
+             'inhibitor treatment: Ruxolitinib',
+             'inhibitor treatment: Trametinib',
+             'inhibitor treatment: Wortmannin',
+             'JTE 013',
+             'KLA2h',
+             'KW 2449',
+             'Listeria',
+             'LCC-12',
+             'lovastatin',
+             'LPA',
+             'LPS exposed, collected at ', 
+             'LPS-treated FA', 
+             'LPS-treated PMX',
+             'LTB4',
+             'MAF', 
+             'MaIL1',
+             'MCF7',
+             'MDA-MB-231',
+             'MDM4 KO', 
+             'mevalonate', 
+             'MGCD-265',
+             'miR-221', 
+             'MITOXANTRONE',
+             'MLN2238',
+             'MS275',
+             'mtb',
+             'Mtb',
+             'MTB', 
+             'MUC1-ST',
+             'N6OU', 
+             'NAMPT',
+             'native LDL',
+             'NC410', 
+             'Negative_Pooled_Serum',
+             'Negatively selected monocyte. No culture,',
+             'Niclosamide',
+             'NVP',
+             'oA[beta]',
+             'OSM',
+             'ox-LDL',
+             'oxLDL', 
+             'OxPAPC',
+             'Palmitate', 
+             'PECAM1',
+             'Penfluridol',
+             'Peripheral blood leukocytes', 
+             'pEXO',
+             'PF4',
+             'PGE2',
+             'Phago-Act', 
+             'PLAU',
+             'Prednisolone', 
+             'PU.1',
+             'Purmorphamine',
+             'PZA', 
+             'QKI', 
+             'QS 11',
+             'RABV', 
+             'RANKL', 
+             'RARRES2',
+             'RecombinantDNA',
+             'Regorafenib',
+             'RESTV',
+             'RIF',
+             'ruxolitinib',
+             'SAA1',
+             'Salmonella',
+             'SARS-CoV-2 infected',
+             'SCH 79797',
+             'Scrambled (control) siRNA',
+             'SEMA4D',
+             'SERPING1',
+             'shEGR1', 
+             'shLUC', 
+             'siATF4', 
+             'siGCN2',
+             'Siglec-1',
+             'siControl',
+             'siCTRL',
+             'siRNA control',
+             'siRNA knockdown', 
+             'sirna: siCtrl',
+             'siTFAM1', 
+             'SMER 3',
+             'Sorafenib',
+             'SP140', 
+             'spergillus',
+             'SPP1',
+             'SREBP',
+             'STAT3 knockdown', 
+             'stimulator: HIV-1', 
+             'T0901317', 
+             'T3 exposed',
+             'TAF', 
+             'Taxol',
+             'TCM',
+             'TDF',
+             'TET2ASO',
+             'TFAM2',
+             'THBS1',
+             'thiostrepton',
+             'TNF +', 
+             'transfected with', 
+             'treated with mito',
+             'treated with Poly',
+             'treatment: 24h 1:5 human serum',
+             'treatment: BCG', 
+             'treatment: control EV',
+             'treatment: DEF,', 
+             'treatment: EV,',
+             'treatment: EV_PA',
+             'Treatment: HIV', 
+             'treatment: HP',
+             'treatment: NEF EV',
+             'treatment: plaque',
+             'treatment: siRNA Control',
+             'treatment: S_typh',
+             'treatment: Triamcinolone acetonide',
+             'treatment: TRUE',
+             'treatment_protocol: BCG Bulgaria',
+             'treatment_protocol: BCG Denmark',
+             'Temsirolimus',
+             'TREML4',
+             'triptolide',
+             'Trisomic', 
+             'Triumeq',
+             'TSLP',
+             'uberculosis',
+             'VEGFA',
+             'virus',
+             'vitamin d treatment: vitamin D treated',
+             'with CXCL4', 
+             'WNT7A',
+             'ZIKV', 
+             ' BG exposed, collected at')
+
+# Search every column for matching names from list
+Removed <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  MDM <- MDM %>% mutate(ID = 
+                          case_when(str_detect(characteristics_ch1, x) | 
+                                      str_detect(source_name_ch1, x) |
+                                      str_detect(title, x) |
+                                      str_detect(series_id, x) ~ 'Remove', 
+                                    
+                                    TRUE ~ as.character(.$ID)))
+  
+  MDM <- MDM %>% subset(ID == 'Remove')
+  
+})
+
+# Combine data into one location
+Removed <- unique(do.call(rbind, Removed))
+
+########################### Recover Samples ########################### 
+
+list <- list('GSE155697',
+             'treatment: GM-CSF,ifn-l: NT',
+             'treatment: M-CSF,ifn-l: NT',
+             'DMSO_',
+             'mock_3',
+             'LPS_3', 
+             'infection: uninfected (mock control)', 
+             'M1 Macropahges - HC')
+
+# Search every column for matching names from list
+Recovered <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  Removed <- Removed %>% mutate(ID = 
+                          case_when(str_detect(characteristics_ch1, x) | 
+                                      str_detect(source_name_ch1, x) |
+                                      str_detect(title, x) |
+                                      str_detect(series_id, x) ~ 'Recover', 
+                                    
+                                    TRUE ~ as.character(.$ID)))
+  
+  Removed <- Removed %>% subset(ID == 'Recover')
+  
+})
+
+# Combine data into one location
+Recovered <- unique(do.call(rbind, Recovered))
+
+Removed <- anti_join(Removed, Recovered, by = 'geo_accession')
+
+MDM <- anti_join(MDM, Removed, by = 'geo_accession')
+```
+
+### Filter samples by polarization state (M0/M1/M2) based on major polarization methods and remove samples receiving additional treatments
+
+```{r}
+############# M2 ############# 
+
+list <- list('M2', 
+             'm2', 
+             'IL-10', 
+             'IL10', 
+             'IL-4', 
+             'IL4', 
+             'IL13', 
+             'IL-13', 
+             'TGFb', 
+             'TGF-b', 
+             'tgfb', 
+             'tgf-b', 
+             'TGF(+)')
+
+# Search every column for matching names from list
+M2 <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  MDM <- MDM %>% mutate(ID = 
+                          case_when(str_detect(characteristics_ch1, x) | 
+                                      str_detect(source_name_ch1, x) |
+                                      str_detect(title, x) |
+                                      str_detect(series_id, x) ~ 'M2', 
+                                    
+                                    TRUE ~ as.character(.$ID)))
+  
+  MDM <- MDM %>% subset(ID == 'M2')
+  
+})
+
+# Combine data into one location
+M2 <- unique(do.call(rbind, M2))
+
+MDM <- anti_join(MDM, M2, by = 'geo_accession')
+
+############# M1 ############# 
+
+list <- list('M1', 
+             'm1', 
+             'LPS', 
+             'lps',
+             'KLA',
+             'bglu',
+             'BG_',
+             'TNF', 
+             'tnf', 
+             'ifn', 
+             'IFN',
+             'IFG',
+             'IFNG',
+             'nterferon',
+             'gamma', 
+             'BSA', 
+             'Pam3CSK4',
+             'IL-1',
+             'IL1',
+             'IL6', 
+             'IL-6', 
+             'Glucan', 
+             'Fumerate', 
+             'RNA_L', 
+             'RNA_T', 
+             'RNA_TL', 
+             'R837', 
+             'R848', 
+             'TLR8',
+             'MDMs_RNAseq_HD-',
+             'MDMs_RNAseq_LDHD-', 
+             'CL264', 
+             'TLR2', 
+             'activated monocyte-derived macrophages')
+
+# Search every column for matching names from list
+M1 <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  MDM <- MDM %>% mutate(ID = 
+                          case_when(str_detect(characteristics_ch1, x) | 
+                                      str_detect(source_name_ch1, x) |
+                                      str_detect(title, x) |
+                                      str_detect(series_id, x) ~ 'M1', 
+                                    
+                                    TRUE ~ as.character(.$ID)))
+  
+  MDM <- MDM %>% subset(ID == 'M1')
+  
+})
+
+# Combine data into one location
+M1 <- unique(do.call(rbind, M1))
+
+MDM <- anti_join(MDM, M1, by = 'geo_accession')
+
+################################################ Filter Polarization ################################################ 
+
+########## M2 ########## 
+
+list <- list('antibodies/tags: Anti CD298',
+             'ctrl_LPS',
+             'with LPS',
+             'LPS-treated',
+             'LPS +',
+             'exposed to LPS',
+             'IFN',
+             'IRF1_KD',
+             'IRF7_KD',
+             'IRF9_KD',
+             'ID2_KD', 
+             'treatment: 8h_GMTGW', 
+             'treatment: IL-4/IL-6 co-stimulation', 
+             '_TNFa_', 
+             'IL4 and LPS co-exposed')
+
+# Search every column for matching names from list
+M2_remove <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  M2 <- M2 %>% mutate(ID = 
+                        case_when(str_detect(characteristics_ch1, x) | 
+                                    str_detect(source_name_ch1, x) |
+                                    str_detect(title, x) |
+                                    str_detect(series_id, x) ~ 'M2_remove', 
+                                  
+                                  TRUE ~ as.character(.$ID)))
+  
+  M2 <- M2 %>% subset(ID == 'M2_remove')
+  
+})
+
+# Combine data into one location
+M2_remove <- unique(do.call(rbind, M2_remove))
+
+M2 <- anti_join(M2, M2_remove, by = 'geo_accession')
+
+########## M1 ########## 
+
+list <- list('control macrophage, M1', 
+             'KM1', 
+             'GSE164498', 
+             'co-exposed',
+             'DEF')
+
+# Search every column for matching names from list
+M1_remove <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  M1 <- M1 %>% mutate(ID = 
+                        case_when(str_detect(characteristics_ch1, x) | 
+                                    str_detect(source_name_ch1, x) |
+                                    str_detect(title, x) |
+                                    str_detect(series_id, x) ~ 'M1_remove', 
+                                  
+                                  TRUE ~ as.character(.$ID)))
+  
+  M1 <- M1 %>% subset(ID == 'M1_remove')
+  
+})
+
+# Combine data into one location
+M1_remove <- unique(do.call(rbind, M1_remove))
+
+M1 <- anti_join(M1, M1_remove, by = 'geo_accession')
+
+########## M0 ########## 
+
+list <- list('cell type: PBMC-derived macrophages,cell source: generated in vitro', 
+             'stimulated with S-protein', 
+             'RASF', 
+             '7 days of HIV infection',
+             'GSE168045', 
+             'MSC Educated Macrophages', 
+             'BM Derived Macrophages', 
+             'NAPRT', 
+             'decidual macrophage', 
+             'Dexamethasone', 
+             'attached to dish for 1  hour')
+
+# Search every column for matching names from list
+M0_remove <- lapply(list, function(x){
+  
+  x <- fixed(x)
+  
+  MDM <- MDM %>% mutate(ID = 
+                          case_when(str_detect(characteristics_ch1, x) | 
+                                      str_detect(source_name_ch1, x) |
+                                      str_detect(title, x) |
+                                      str_detect(series_id, x) ~ 'M0_remove', 
+                                    
+                                    TRUE ~ as.character(.$ID)))
+  
+  MDM <- MDM %>% subset(ID == 'M0_remove')
+  
+})
+
+# Combine data into one location
+M0_remove <- unique(do.call(rbind, M0_remove))
+
+M0 <- anti_join(MDM, M0_remove, by = 'geo_accession')
+
+All_Polarization <- rbind(M0, M1, M2)
+
+All_Polarization <- All_Polarization %>% 
+  
+  mutate(ID = 
+           case_when(str_detect(ID, 'MDM') ~ 'M0', 
+                     
+                     TRUE ~ as.character(.$ID)))
+
+All_Polarization$Polarization <- All_Polarization$ID
+All_Polarization <- All_Polarization %>% select(Polarization, everything())
+
+M0 <- All_Polarization %>% subset(ID == 'M0')
+M1 <- All_Polarization %>% subset(ID == 'M1')
+M2 <- All_Polarization %>% subset(ID == 'M2')
+```
+
+### Identify M0 samples which should not be included
+
+```{r}
+# Filter method allows for easier combination of terms to capture mixed exposures
+# As a few treated samples made it through previous sorting, these samples are removed here
+
+M0_JNK <- M0 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  
+  filter(str_detect(combined, 'PMA') |
+           str_detect(combined, 'Mycobacterium tuberculosis')) %>% select(-combined)
+
+M0 <- M0[!(rownames(M0) %in% rownames(M0_JNK)), ]
+
+M0_JNK$ID <- 'JNK'
+```
+
+### Asign M1 polarization methods to M1 samples
+
+```{r}
+M1_JNK <- M1 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  filter((str_detect(combined, '_TL_') |
+            str_detect(combined, 'IFNgTNFa') | 
+            str_detect(combined, '_IFN_T_') | 
+            str_detect(combined, 'PMA') | 
+            str_detect(combined, 'Pam3CSK4') | 
+            str_detect(combined, 'lps stimulated : FALSE') | 
+            str_detect(combined, 'ligand: FGF1') | 
+            str_detect(combined, 'ligand: IL15') | 
+            str_detect(combined, 'ligand: IL1A') | 
+            str_detect(combined, 'ligand: IL1B') | 
+            str_detect(combined, 'ligand: TGFB1') |
+            str_detect(combined, 'ligand: IFNB1') |
+            str_detect(combined, 'ligand: TGFB1') |
+            str_detect(combined, 'Interferon-beta') |
+            str_detect(combined, 'IFNb') |
+            str_detect(combined, 'Interferon-alpha') |
+            str_detect(combined, 'Interferon-lambda') |
+            str_detect(combined, 'Interferon-epsilon') |
+            str_detect(combined, 'GSE182823') |
+            str_detect(series_id, 'GSE100382,GSE100383') | 
+            str_detect(series_id, 'GSE206030')) |
+         
+            (str_detect(combined, 'TLR2') & 
+               str_detect(combined, 'IFN'))) %>% select(-combined)
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_JNK)), ]
+
+M1_JNK$ID <- 'JNK'
+
+####################
+
+M1_LPS_IFN <- M1 %>% mutate(combined = str_c(ID, 
+                                             characteristics_ch1, 
+                                             data_processing, 
+                                             extract_protocol_ch1, 
+                                             source_name_ch1, 
+                                             title, 
+                                             sep = " ")) %>% 
+  filter((str_detect(combined, 'LPS') | 
+            str_detect(combined, 'Lps') |
+            str_detect(combined, 'lps')) & 
+           (str_detect(combined, 'IFN') | 
+              str_detect(combined, 'Interferon') |
+              str_detect(combined, 'IFG') | 
+              str_detect(combined, 'INF')) |
+           str_detect(combined, 'RNA_IFN_L') |
+           str_detect(series_id, 'GSE149638') | 
+           str_detect(series_id, 'GSE173611') | 
+           str_detect(series_id, 'GSE205990') | 
+           str_detect(series_id, 'GSE117040,GSE117125') |
+           str_detect(series_id, 'GSE160862,GSE160864') | 
+           str_detect(series_id, 'GSE157182')) %>% select(-combined)
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_LPS_IFN)), ]
+
+M1_LPS_IFN$ID <- 'LPS_IFN'
+
+remove <- M1_LPS_IFN %>% subset(series_id == 'GSE202515')
+M1_LPS_IFN <- M1_LPS_IFN %>% subset(series_id != 'GSE202515')
+
+####################
+
+M1_IFN <- M1 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  filter((str_detect(combined, 'IFN') | 
+            str_detect(combined, 'Ifn') | 
+            str_detect(combined, 'ifn') |
+            str_detect(combined, 'IFG') |
+            str_detect(combined, 'INFG') |
+            str_detect(combined, 'Interferon'))) %>% select(-combined)
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_IFN)), ]
+
+M1_IFN$ID <- 'IFN'
+
+M1_IFN <- rbind(M1_IFN, remove)
+
+remove(remove)
+
+####################
+
+M1_B_Glu <- M1 %>% mutate(combined = str_c(ID, 
+                                           characteristics_ch1, 
+                                           data_processing, 
+                                           extract_protocol_ch1, 
+                                           source_name_ch1, 
+                                           title, 
+                                           sep = " ")) %>% 
+  filter((str_detect(combined, 'B-glucan') | 
+            str_detect(combined, 'BG_') | 
+            str_detect(combined, 'bglu'))) %>% select(-combined)
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_B_Glu)), ]
+
+M1_B_Glu$ID <- 'BGLU'
+
+####################
+
+M1_TNF <- M1 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  filter((str_detect(combined, 'TNF') | 
+            str_detect(combined, 'tnf') | 
+            str_detect(combined, 'RNA_T'))) %>% select(-combined)
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_TNF)), ]
+
+M1_TNF$ID <- 'TNF'
+
+####################
+
+M1_IL6 <- M1 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  filter((str_detect(combined, 'IL-6') | 
+            str_detect(combined, 'IL6') | 
+            str_detect(combined, 'il-6') | 
+            str_detect(combined, 'il6'))) %>% select(-combined)
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_IL6)), ]
+
+M1_IL6$ID <- 'IL6'
+
+####################
+
+M1_TLR <- M1 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  filter((str_detect(combined, 'TLR1') | #TLR1/2/7/8
+            str_detect(combined, 'TLR2') |
+            str_detect(combined, 'TLR7') |
+            str_detect(combined, 'TLR8')) |
+           str_detect(combined, 'CL264') | # TLR8
+           str_detect(combined, 'R848') | # TLR7/8
+           str_detect(combined, 'R837')) %>% select(-combined) # TLR7
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_TLR)), ]
+
+M1_TLR$ID <- 'TLR'
+
+####################
+
+M1_BSA <- M1 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  
+  filter((str_detect(combined, 'BSA'))) %>% select(-combined)
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_BSA)), ]
+
+M1_BSA$ID <- 'BSA'
+
+####################
+
+M1_LPS <- M1 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  filter((str_detect(combined, 'LPS') | 
+            str_detect(combined, 'Lps') |
+            str_detect(combined, 'lps')| 
+            str_detect(combined, 'HD') | 
+            str_detect(combined, 'RNA_L'))) %>% select(-combined)
+
+M1 <- M1[!(rownames(M1) %in% rownames(M1_LPS)), ]
+
+M1_LPS$ID <- 'LPS'
+
+####################
+
+M1$ID <- 'Unknown'
+
+M1 <- rbind(M1, 
+            M1_JNK, 
+            M1_B_Glu,
+            M1_BSA, 
+            M1_IFN, 
+            M1_IL6, 
+            M1_LPS, 
+            M1_LPS_IFN,
+            M1_TLR,
+            M1_TNF)
+```
+
+### Asign M2 polarization methods to M2 samples
+
+```{r}
+M2_JNK <- M2 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  
+  filter(str_detect(combined, 'IL6') | 
+           str_detect(series_id, 'GSE133527') | # M-CSF only
+           str_detect(series_id, 'GSE202286') | # These 5 are M0 with title M2XX
+           str_detect(series_id, 'GSE90748') | # M-CSF only
+           str_detect(series_id, 'GSE160200') # M-CSF only
+  ) %>% select(-combined)
+
+M2 <- M2[!(rownames(M2) %in% rownames(M2_JNK)), ]
+
+M2_JNK$ID <- 'JNK'
+
+######################## 
+
+M2_TGF <- M2 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  
+  filter(((str_detect(combined, 'TGF')))) %>% select(-combined)
+
+M2 <- M2[!(rownames(M2) %in% rownames(M2_TGF)), ]
+
+M2_TGF$ID <- 'TGF'
+
+########################
+
+M2_IL4 <- M2 %>% mutate(combined = str_c(ID, 
+                                         characteristics_ch1, 
+                                         data_processing, 
+                                         extract_protocol_ch1, 
+                                         source_name_ch1, 
+                                         title, 
+                                         sep = " ")) %>% 
+  
+
+  filter(((str_detect(combined, 'IL4') | 
+             str_detect(combined, 'IL-4')) &
+            
+            (!str_detect(combined, 'IL-13') &
+               !str_detect(combined, 'IL13')) &
+            
+            (!str_detect(combined, 'IL-10') &
+               !str_detect(combined, 'IL10'))) | 
+           
+           str_detect(geo_accession, 'GSE205990') |
+           str_detect(geo_accession, 'GSE36952') |
+           
+           str_detect(series_id, 'GSE55536')) %>% select(-combined)
+
+M2 <- M2[!(rownames(M2) %in% rownames(M2_IL4)), ]
+
+M2_IL4$ID <- 'IL4'
+
+######################## 
+
+M2_IL13 <- M2 %>% mutate(combined = str_c(ID, 
+                                          characteristics_ch1, 
+                                          data_processing, 
+                                          extract_protocol_ch1, 
+                                          source_name_ch1, 
+                                          title, 
+                                          sep = " ")) %>% 
+  
+  filter(((str_detect(combined, 'IL13') | 
+             str_detect(combined, 'IL-13')) &
+            
+            (!str_detect(combined, 'IL-4') &
+               !str_detect(combined, 'IL4')) &
+            
+            (!str_detect(combined, 'IL-10') &
+               !str_detect(combined, 'IL10')))) %>% select(-combined)
+
+M2 <- M2[!(rownames(M2) %in% rownames(M2_IL13)), ]
+
+M2_IL13$ID <- 'IL13'
+
+######################## 
+
+M2_IL10 <- M2 %>% mutate(combined = str_c(ID, 
+                                          characteristics_ch1, 
+                                          data_processing, 
+                                          extract_protocol_ch1, 
+                                          source_name_ch1, 
+                                          title, 
+                                          sep = " ")) %>% 
+  
+  filter(((str_detect(combined, 'IL10') | 
+             str_detect(combined, 'IL-10')) &
+            
+            (!str_detect(combined, 'IL-4') &
+               !str_detect(combined, 'IL4')) &
+            
+            (!str_detect(combined, 'IL-13') &
+               !str_detect(combined, 'IL13')) | 
+            
+            str_detect(geo_accession, 'GSM6237673') | 
+            str_detect(geo_accession, 'GSM6237684') |
+            str_detect(geo_accession, 'GSM6237694'))) %>% select(-combined)
+
+M2 <- M2[!(rownames(M2) %in% rownames(M2_IL10)), ]
+
+M2_IL10$ID <- 'IL10'
+
+######################## 
+
+M2_IL4_IL10 <- M2 %>% mutate(combined = str_c(ID, 
+                                              characteristics_ch1, 
+                                              data_processing, 
+                                              extract_protocol_ch1, 
+                                              source_name_ch1, 
+                                              title, 
+                                              sep = " ")) %>% 
+  
+  filter(((str_detect(combined, 'IL4') | 
+             str_detect(combined, 'IL-4')) &
+            
+            (str_detect(combined, 'IL10') |
+               str_detect(combined, 'IL-10')) &
+            
+            (!str_detect(combined, 'IL-13') &
+               !str_detect(combined, 'IL13')))) %>% select(-combined)
+
+M2 <- M2[!(rownames(M2) %in% rownames(M2_IL4_IL10)), ]
+
+M2_IL4_IL10$ID <- 'IL4_IL10'
+
+######################## 
+
+M2_IL4_IL13 <- M2 %>% mutate(combined = str_c(ID, 
+                                              characteristics_ch1, 
+                                              data_processing, 
+                                              extract_protocol_ch1, 
+                                              source_name_ch1, 
+                                              title, 
+                                              sep = " ")) %>% 
+  
+  filter(((str_detect(combined, 'IL4') | 
+             str_detect(combined, 'IL-4')) &
+            
+            (str_detect(combined, 'IL13') |
+               str_detect(combined, 'IL-13')) &
+            
+            (!str_detect(combined, 'IL-10') &
+               !str_detect(combined, 'IL10'))) |
+           
+           str_detect(series_id, 'GSE117040,GSE117125') | 
+           str_detect(series_id, 'GSE144990,GSE144992') | 
+           str_detect(series_id, 'GSE157182') | 
+           str_detect(series_id, 'GSE173611') | 
+           str_detect(series_id, 'GSE195685,GSE195686')) %>% select(-combined)
+
+M2_IL4_IL13$ID <- 'IL4_IL13'
+
+M2 <- M2[!(rownames(M2) %in% rownames(M2_IL4_IL13)), ]
+
+M2 <- rbind(M2_IL10, 
+            M2_IL13,
+            M2_IL4,
+            M2_IL4_IL10,
+            M2_IL4_IL13, 
+            M2_JNK,
+            M2_TGF)
+```
+
+### Extract count data for samples
+
+```{r}
+# Combine all selected samples into a single place
+All_Polarization_Polarization_ID <- rbind(M0, M1, M2)
+
+# Selected samples to be extracted
+samp = as.character(row.names(All_Polarization_Polarization_ID))
+
+destination_file = "human_gene_v2.2.h5" # Originally accessed on Oct_13_2023
+extracted_expression_file = "macrophage_expression_matrix.tsv"
+
+# Retrieve information from compressed data
+samples = h5read(destination_file, "meta/samples/geo_accession")
+genes = h5read(destination_file, "meta/genes/ensembl_gene_id")
+
+# Identify columns to be extracted
+sample_locations = which(samples %in% samp)
+
+# extract gene expression from compressed data
+expression = t(h5read(destination_file, 
+                      "data/expression", 
+                      index = list(sample_locations, 
+                                   1:length(genes))))
+
+H5close()
+
+rownames(expression) = genes
+colnames(expression) = samples[sample_locations]
+
+# Print file
+write.table(expression, 
+            file = extracted_expression_file, 
+            sep = "\t", 
+            quote = FALSE, 
+            col.names = NA)
+
+print(paste0("Expression file was created at ", 
+             getwd(), 
+             "/", 
+             extracted_expression_file))
+
+# Import sorted MDMs and polarization ID
+MDM_df <- read_tsv('Macrophage_expression_matrix.tsv')
+
+names <- colnames(MDM_df[2:ncol(MDM_df)])
+
+All_Polarization_Polarization_ID <- All_Polarization_Polarization_ID[names, ]
+
+colnames(MDM_df)[1] <- 'Gene'
+
+MDM_df <- t(data.frame(MDM_df[2:length(MDM_df)], 
+                       row.names = MDM_df$Gene))
+
+MDM_df <- as.data.frame(cbind(All_Polarization_Polarization_ID$series_id,
+                              All_Polarization_Polarization_ID$Polarization,
+                              All_Polarization_Polarization_ID$ID, 
+                              MDM_df))
+
+colnames(MDM_df)[1:3] <- c('series_id', 'polarization', 'ID')
+
+# Save the resulting data for downstream analysis
+save(MDM_df, 
+     file = 'MDM_Data_by_Polarization.RData')
+```

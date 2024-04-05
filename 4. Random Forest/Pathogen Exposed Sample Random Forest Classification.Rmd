@@ -1,0 +1,296 @@
+---
+title: "Pathogen Exposed Sample Random Forest Classification"
+author: "Timothy Smyth"
+date: "2024-04-01"
+output: html_document
+---
+
+# Pathogen Exposed Sample Random Forest Classification
+
+### This file employs the random forest models generated in 'Random Forest' to classify bacterially or virally exposed MDM samples as M0, LPS, IFNy, or LPS+IFNy. This seeks to determine which polarization method best resembles MDMs following various pathogen exposures.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Environment setup
+
+```{r message = FALSE}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+library(tibble)
+library(tidyverse)
+library(dplyr)
+library(caTools)
+library(caret)
+library(ranger)
+library(ROCR)
+library(ConfusionTableR)
+library(ggplot2)
+library(RColorBrewer)
+library(dendextend)
+library(edgeR)
+```
+
+### Load and format count data for pathogen exposed samples
+
+Input data needed for this process are the count and metadata of pathogen exposed samples, batch corrected and sample selected data from the original data set, and the three random forest models
+
+```{r}
+load("Infected.RData")
+load("Infected_Metadata.RData")
+load("Batched_Data_Select_Method.RData")
+
+Infected_df %>% count(Agent)
+
+Infected_df <- Infected_df %>% rownames_to_column() 
+
+# Filter out samples with less than 5 samples and remove unuseable groups
+Infected_df <- Infected_df %>%
+  na.omit() %>%
+  group_by(Agent) %>%
+  filter(n() >= 5) %>% 
+  data.frame()
+
+Infected_df %>% count(Agent)
+
+Infected_df$series_id <- gsub(",", "_", Infected_df$series_id) 
+
+# Isolate sample info and set to factor
+names <- Infected_df$rowname
+info <- as.data.frame(Infected_df[, 2:4], row.names = names)
+Infected_df <- Infected_df %>% subset(select = -c(1:4))
+Infected_df <- as.data.frame(sapply(Infected_df, as.numeric))
+
+# This changes gene name formatting for some reason
+# This is important for filtering genes before limma-voom DEG calculation
+Infected_df <- t(data.frame(Infected_df, row.names = names))
+
+# Convert into a matrix
+counts <- as.matrix(Infected_df)
+
+Agent <- factor(info$Agent, 
+                levels = c('Listeria',
+                           'L. pneumophila',
+                           'Mycobacterium smegmatis',
+                           'Mycobacterium tuberculosis',
+                           'Salmonella typhimurium',
+                           'Staphylococcus epidermidis',
+                           'Yersinia pseudotuberculosis',
+                           
+                           'Chikungunya Virus',
+                           'Ebola Virus',
+                           'HIV',
+                           'IAV',
+                           'Reston Virus',
+                           'Zika Virus'))
+```
+
+### Remove genes that were removed from the original data set and convert count data to log count per million data
+
+```{r}
+# Create DGEList object
+d0 <- DGEList(Infected_df, 
+              group = Agent)
+
+# Calculate normalization factor
+d0 <- calcNormFactors(d0)
+
+# Remove filtered genes
+d0 <- d0[colnames(Batched_MDM_df[5:ncol(Batched_MDM_df)]), ]
+
+# Calculate normalization factor
+d0 <- calcNormFactors(d0)
+
+# Calculate logCPM of filtered gene set
+lcpm <- cpm(d0, log = TRUE)
+
+# Add polarization information and series_ID
+lcpm <- as.data.frame(t(lcpm))
+
+lcpm <- data.frame(info, lcpm)
+```
+
+### Select samples using dendrogram clustering
+
+```{r}
+list <- as.list(unique(as.character(lcpm$Agent)))
+
+dend <- lapply(list, function(x){
+  
+  tmp <- lcpm %>% subset(Agent == x)
+  names <- rownames(tmp)
+  tmp_series <- tmp$series_id
+  
+  # Remove metadata, convert count data to numeric, and set sample to row names
+  tmp <- tmp %>% 
+    subset(select = -c(1:3)) %>% 
+    as.data.frame(row.names = names)
+ 
+  # Calculate sample correlation and create dendrograms
+  tmp_dend <- cor(t(tmp))
+  tmp_dend <- as.dendrogram(hclust(as.dist(1 - tmp_dend)))
+  
+  # Isolate each unique GEO series ID
+  useries = unique(tmp_series)
+  
+  # Match unique series to series list and record row location of each series
+  series_match = useries[match(tmp_series, useries)]
+  
+  # Set colors
+  colos <- colorspace::rainbow_hcl(length(tmp_series), 
+                                   c = 160, 
+                                   l  = 50)
+  # Set colors to series ID
+  names(colos) = tmp_series
+  
+  # Set matched colors
+  series_color <- colos[series_match]
+  
+  # Create clusters
+  clu = cutree(tmp_dend, 
+               h = 0.25) # Height for cut (1 - correlation coefficient)
+  
+  # Set colors of labels
+  labels_colors(tmp_dend) <- series_color[order.dendrogram(tmp_dend)]
+  
+  # Create dendrograms
+  tmp_dend <- color_branches(tmp_dend, 
+                             h = 0.25) # Height of cut (1 - correlation coefficient)
+  
+  # Set plot dimmensions
+  par(mar = c(4,1,1,12))
+  
+  # Plot dendrograms
+  plot(tmp_dend,
+       main = as.character(x),
+       horiz = TRUE) +
+    
+    abline(v = 0.25, lty = 2)
+  
+  # Create color bar to show cluster and series ID of samples
+  colored_bars(cbind(clu, 
+                     series_color), 
+               tmp_dend, 
+               rowLabels = c("Cluster", "Series"), 
+               horiz = TRUE)
+  
+  # Isolate samples from single polarization method
+  tmp <- lcpm %>% subset(Agent == x)
+  
+  # Add cluster number information to data
+  tmp <- cbind(clu, tmp)
+  colnames(tmp)[1] <- 'cluster'
+  tmp <- tmp %>% select(ID, everything())
+  
+  # Determine the largest cluster and isolate samples in that cluster
+  largest_cluster = names(rev(sort(table(tmp$cluster))))[1]
+  samples = which(tmp$cluster == largest_cluster)
+  tmp[samples, ]
+  
+})
+
+Selected_Infected_df <- do.call(rbind, dend) %>% subset(select = -c(2))
+info <- info[rownames(Selected_Infected_df), ]
+
+info %>% count(Agent)
+```
+
+### Remove batch effect with removeBatchEffect
+
+```{r}
+# Create model matrix to remove batch effects
+Design <- model.matrix(~ Agent, 
+                       data = info)
+
+# Set info to factor for removeBatchEffect
+info$series_id <- factor(info$series_id)
+
+Batched_lcpm <- t(Selected_Infected_df[4:ncol(Selected_Infected_df)])
+
+# Requires samples as columns
+Batched_lcpm <- limma::removeBatchEffect(Batched_lcpm,
+                                         batch = info$series_id,
+                                         design = Design)
+
+Batched_lcpm <- t(Batched_lcpm)
+
+save(file = 'Batched_Infected.RData', 
+     Batched_lcpm, 
+     info, 
+     Infected)
+```
+
+### Perform random forest classification using the random forest models
+
+```{r}
+load("RF_Model.RData") # Original model with all significant genes
+load("Top_10000_Pruned_RF_Model.RData") # Model with top 10000 genes by permutation importance of original model
+load("Top_1000_Pruned_RF_Model.RData") # Model with top 1000 genes by permutation importance of top 10000 model
+
+list <- list(classifier_RF, 
+             Top_10000_classifier_RF_pruned,
+             Top_1000_classifier_RF_pruned)
+
+lapply(list, function(x){
+  
+  # Predict
+  p1 <- predict(x, Batched_lcpm)
+  
+  # Add sample information to prediction outcomes
+  prediction <- cbind(rownames(Batched_lcpm), p1[["predictions"]])
+  colnames(prediction) <- c('sample', 'Prediction')
+  prediction <- data.frame(prediction)
+  
+  info <- info %>% rownames_to_column()
+  colnames(info)[1] <- 'sample'
+  
+  prediction <- merge(info, prediction, by = 'sample')
+  
+  # Change prediction number to ID matching prediction
+  # This corresponds to the factor levels of the RF models
+  prediction$Prediction[prediction$Prediction == 1] <- 'M0'
+  prediction$Prediction[prediction$Prediction == 2] <- 'IFN'
+  prediction$Prediction[prediction$Prediction == 3] <- 'LPS'
+  prediction$Prediction[prediction$Prediction == 4] <- 'IFN_LPS'
+  
+  prediction$Prediction <- factor(prediction$Prediction, 
+                                  levels = c('M0', 
+                                             'IFN', 
+                                             'LPS',
+                                             'IFN_LPS'))
+  
+  prediction$Agent <- factor(prediction$Agent, 
+                             levels = c('Listeria',
+                                        'L. pneumophila',
+                                        'Mycobacterium smegmatis',
+                                        'Mycobacterium tuberculosis',
+                                        'Salmonella typhimurium',
+                                        'Staphylococcus epidermidis',
+                                        'Yersinia pseudotuberculosis',
+                                        
+                                        'Chikungunya Virus',
+                                        'Ebola Virus',
+                                        'HIV',
+                                        'IAV',
+                                        'Reston Virus',
+                                        'Zika Virus'))
+  
+  # Plot the results
+  ggplot(data = prediction, 
+       aes(x = Agent, 
+           y = Prediction)) +
+  
+  geom_jitter(aes(color = Prediction), 
+              width = 0.2) +
+  
+  theme(axis.text.x = element_text(size = 12, 
+                                   angle = 45, 
+                                   hjust = 1), 
+        
+        axis.text.y = element_text(size = 12), 
+        
+        axis.title = element_text(size = 16))
+})
+```
+

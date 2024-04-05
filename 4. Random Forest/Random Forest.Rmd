@@ -1,0 +1,518 @@
+---
+title: "Random Forest"
+author: "Timothy Smyth"
+date: "2024-03-27"
+output: html_document
+---
+
+# Random Forest Analysis
+
+### This file performs random forest modeling of M0 and M1 polarized macrophages to determine whether M1 macrophages can be accurately classified based on identified polarization methods. This analysis further seeks to determine the top most contributors to the random forest model for downstream analysis. Input data is batch corrected, gene and sample filtered log CPM data from 'Gene and Sample Filtering'.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Environment setup
+
+```{r message = FALSE}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+library(tibble)
+library(tidyverse)
+library(dplyr)
+library(caTools)
+library(caret)
+library(ranger)
+library(grid)
+library(gridExtra)
+library(gridtext)
+library(ggpubr)
+library(randomForest)
+library(ROCR)
+library(ConfusionTableR)
+library(ggplot2)
+library(vip)
+library(future.apply)
+```
+
+### Load data and perform one-way ANOVA to determine genes with significantly different count data between groups. After running one-way ANOVA, calculate BH adjusted p-values and retain genes with adj. p-value < 0.05.
+
+```{r}
+# Load data
+load('Batched_Data_Select_Method.RData')
+
+# Rename data frame
+MDM_df <- Batched_MDM_df
+remove(Batched_MDM_df)
+
+# Isolate M0 and M1 groups
+MDM_df <- MDM_df %>% subset(ID == 'M0' |
+                              ID == 'IFN' |
+                              ID == 'LPS' |
+                              ID == 'LPS_IFN')
+
+# Reorder info data frame to match count data
+info <- info[rownames(MDM_df), ]
+
+ID <- factor(info$ID,
+             levels = c('M0', 
+                        'IFN', 'LPS', 'LPS_IFN'))
+
+# Remove metadata
+MDM_df <- MDM_df[5:ncol(MDM_df)]
+
+# Set maximum size allowed to be passed to future to 850 MB
+options(future.globals.maxsize= 891289600)
+
+# Begin future multisession for parallelization
+plan(multisession)
+
+# Run One-Way ANOVA and isolate p-values using a parallel lapply from future.apply
+# This is much faster than a loop or standard lapply and time save scales with increasing samples and columns
+anova_results <- future_lapply(MDM_df, function(x) {
+  
+  # Run One-way ANOVA
+  tmp <- broom::tidy(aov(x ~ ID, data = MDM_df))
+  
+  # Isolate p-values
+  tmp <- data.frame(tmp[['p.value']])
+  
+  tmp
+  
+})
+
+# Bind adj p-values to one location
+anova_results <- do.call(cbind, anova_results)
+
+# Rename columns to associated genes
+colnames(anova_results) <- names(MDM_df)
+
+# Add metadata back to count data
+MDM_df <- cbind(info[1:3], MDM_df)
+
+# Define polarization method as a factor named ID
+ID <- factor(MDM_df$ID,
+             levels = c('M0', 
+                        'IFN', 'LPS', 'LPS_IFN'))
+                    
+# Isolate ANOVA p values
+anova_results <- as.data.frame(t(anova_results[1, ]))
+colnames(anova_results)[1] <- 'p_value'
+
+# Order by ascending p value and rank
+anova_results <- anova_results %>% arrange(p_value)
+anova_results$Rank <- seq_along(1:nrow(anova_results))
+
+# Calculate adjusted p-value using BH method (FDR)
+anova_results$BH <-  p.adjust(anova_results$p_value, 
+                              method = 'BH')
+
+# Isolate significant comparisons
+BH_results <- anova_results %>% subset(BH < 0.05)
+
+# Isolate names of significant genes
+names <- rownames(BH_results)
+
+# Remove non-significant genes
+rf <- as.data.frame(MDM_df[, names])
+
+# Add polarization method information back
+rf <- data.frame(ID, rf)
+```
+
+### Calculate sample case weights for random forest modeling. This adjusts the likelihood of samples from underrepresented classes to be selected for inclusion in bootstrap samples when growing trees in the random forest model.
+
+```{r}
+# Count number of samples in each polarization ID group
+group_num <- rf %>% group_by(ID) %>% 
+  summarise(total_count=n(),
+            .groups = 'drop')
+
+# Filter out samples with less than 5 samples and remove unusable groups
+group_num <- dplyr::filter(group_num, as.numeric(total_count) >= 5)
+
+# Set seed for reproducibility
+set.seed(120)
+
+# Split data into 70/30 split
+split <- sample.split(seq_len(nrow(rf)), SplitRatio = 0.7)
+
+# Create train and test data sets
+train <- subset(rf, split == 'TRUE')
+test <- subset(rf, split == 'FALSE')
+
+# Count number of samples in each polarization ID group
+group_num <- train %>% group_by(ID) %>% 
+  summarise(total_count=n(),
+            .groups = 'drop')
+
+# Set to data frame with row names as polarization state
+group_num <- data.frame(group_num$total_count, 
+                        row.names = group_num$ID)
+
+# Count number of samples in each polarization ID group
+group_num2 <- test %>% group_by(ID) %>% 
+  summarise(total_count=n(),
+            .groups = 'drop')
+
+# Calculate total number of samples
+total <- sum(group_num[, 1])
+
+# Calculate the fraction of whole for each polarization state
+fraction <- group_num[, 1]/total
+
+# Calculate ratio for weighing samples
+ratio <- 1 - fraction
+
+# Isolate polarization method of each sample
+pol <- train$ID
+
+# Create weight vector with each value set to 0
+weight <- rep(0, nrow(train))
+
+# Change the weight to the ratio according to polarization ID
+weight[pol == 'M0'] <- ratio[1]
+weight[pol == 'IFN'] <- ratio[2]
+weight[pol == 'LPS'] <- ratio[3]
+weight[pol == 'LPS_IFN'] <- ratio[4]
+```
+
+### Create random forest model using ranger package.
+
+Tree number set to 1500 to ensure adequately high tree numbers to stabilize OOB error rates
+Max tree depth set to 15 splits in case any tree grows beyond 15 splits
+mtry set to sqrt(# genes in training data set) 
+Model permutation importance, which measures the average change in OOB error rates across the forest caused by permuting a single variable (gene) was calculated to determine the most impactful genes in determining polarization method classification
+
+```{r}
+# Define mtry for model
+best.m = sqrt(ncol(rf) - 1)
+
+train$ID <- factor(train$ID, 
+                   levels = c('M0', 
+                              'IFN', 'LPS', 'LPS_IFN'))
+
+test$ID <- factor(test$ID, 
+                  levels = c('M0', 
+                             'IFN', 'LPS', 'LPS_IFN'))
+
+rf$ID <- factor(rf$ID, 
+                levels = c('M0', 
+                           'IFN', 'LPS', 'LPS_IFN'))
+
+# Run the RF model through ranger package
+classifier_RF <- ranger(x = train[-1], 
+                        y = as.factor(train$ID),
+                        num.trees = 1500, # Adequately high enough to stabilize OOB rates
+                        max.depth = 15, # Limit tree depth to 15 splits if any trees would grow beyond 15 splits
+                        mtry = best.m, # mtry set to sqrt(#genes)
+                        case.weights = weight, # Weigh model based on sample ratio
+                        importance = 'permutation') # Calculate permutation importance
+
+print(classifier_RF)
+
+# Assess confusion matrices
+p2 <- predict(classifier_RF, test)
+confusionMatrix(p2$predictions, as.factor(test$ID))
+
+################################################################################
+
+# Add predictions to test data set
+predicted <- cbind(data.frame(class_preds = p2), test)
+
+# Create a confusion matrix of test data predictions and IDs
+confusion_matrix <- as.data.frame(table(p2$predictions, test$ID))
+
+bin_cm <- ConfusionTableR::binary_class_cm(predicted$prediction,
+                                           predicted$ID)
+
+# Isolate model performance data
+RF_Stats <- data.frame(bin_cm[["confusion_matrix"]][["overall"]][1:5])
+colnames(RF_Stats) <- ''
+
+RF_Stats2 <- data.frame(bin_cm[["confusion_matrix"]][["byClass"]])
+RF_Stats2 <- RF_Stats2[, 1:7]
+
+# Create tables of performance data
+RF_stats_Table <- tableGrob(t(round(RF_Stats, 4))) # Accuracy
+RF_stats_Table2 <- tableGrob(round(RF_Stats2, 2)) # Sensitivity/Specificity/Recall
+
+##############
+
+# Plot results of performance data
+plot_results <- ggplot(data = confusion_matrix,
+                       mapping = aes(x = Var2,
+                                     y = Var1)) +
+
+  geom_tile(aes(fill = Freq),
+            show.legend = FALSE) +
+
+  geom_text(aes(label = as.character(Freq)), vjust = 1) +
+
+  scale_fill_gradient(low = "white",
+                      high = "forestgreen",
+                      trans = "log") +
+  # Label x and y axis
+  labs(title = 'Test Data Confusion Matrix',
+       x = "Actual",
+       y = "Prediction") + 
+  
+  # Increase axis text size
+  theme(title = element_text(size = 16, face = 'bold'),
+        axis.title = element_text(size = 16, face = 'bold'), 
+        axis.text = element_text(size = 14))
+
+print(plot_results)
+
+grid.arrange(RF_stats_Table)
+grid.arrange(RF_stats_Table2)
+
+# Save unpruned model
+save(file = 'RF_Model.RData',
+     classifier_RF)
+```
+
+### Determine the top 10,000 genes by permutation importance and retrain the random forest model
+
+```{r}
+# Determine top genes influencing model
+importance <- vip(classifier_RF, 
+                  num_features = ncol(rf[2:ncol(rf)]))
+
+# Isolate importance values and gene IDs
+importance_value <- cbind(importance[["data"]]$Variable, importance[["data"]]$Importance)
+importance_value <- data.frame(as.numeric(importance_value[, 2]), row.names = importance_value[, 1])
+colnames(importance_value)[1] <- 'Importance'
+
+# Isolate top 10000 genes by importance
+importance_value <- importance_value %>% arrange(desc(Importance)) %>% slice(1:10000)
+
+# Prune rf data frame, preserving only filtered variables
+rf_prune <- rf[, colnames(t(importance_value))]
+
+# Add polarization information for RF
+rf_prune <- cbind(MDM_df$ID, rf_prune)
+colnames(rf_prune)[1] <- 'ID'
+
+train <- train[, colnames(t(importance_value))]
+train <- cbind(MDM_df[rownames(train), ]$ID, train)
+colnames(train)[1] <- 'ID'
+
+test <- test[, colnames(t(importance_value))]
+test <- cbind(MDM_df[rownames(test), ]$ID, test)
+colnames(test)[1] <- 'ID'
+
+train$ID <- factor(train$ID, 
+                   levels = c('M0', 
+                              'IFN', 'LPS', 'LPS_IFN'))
+
+test$ID <- factor(test$ID, 
+                  levels = c('M0', 
+                             'IFN', 'LPS', 'LPS_IFN'))
+
+rf_prune$ID <- factor(rf_prune$ID, 
+                      levels = c('M0', 
+                                 'IFN', 'LPS', 'LPS_IFN'))
+
+# mtry set to sqrt(#genes)
+best.m = sqrt(nrow(importance_value))
+
+# Run the RF model through ranger package
+Top_10000_classifier_RF_pruned <- ranger(x = train[-1], 
+                                         y = as.factor(train$ID),
+                                         num.trees = 1500, 
+                                         max.depth = 15, 
+                                         mtry = best.m, 
+                                         case.weights = weight,
+                                         importance = 'permutation')
+                               
+print(Top_10000_classifier_RF_pruned)
+
+# Assess confusion matrices
+p2 <- predict(Top_10000_classifier_RF_pruned, test)
+confusionMatrix(p2$predictions, as.factor(test$ID))
+
+################################################################################
+
+# Add predictions to test data set
+predicted <- cbind(data.frame(class_preds = p2), test)
+
+# Create a confusion matrix of test data predictions and IDs
+confusion_matrix <- as.data.frame(table(p2$predictions, test$ID))
+
+bin_cm <- ConfusionTableR::binary_class_cm(predicted$prediction,
+                                           predicted$ID)
+
+# Isolate model performance data
+RF_Stats <- data.frame(bin_cm[["confusion_matrix"]][["overall"]][1:5])
+colnames(RF_Stats) <- ''
+
+RF_Stats2 <- data.frame(bin_cm[["confusion_matrix"]][["byClass"]])
+RF_Stats2 <- RF_Stats2[, 1:7]
+
+# Create tables of performance data
+RF_stats_Table <- tableGrob(t(round(RF_Stats, 4))) # Accuracy
+RF_stats_Table2 <- tableGrob(round(RF_Stats2, 2)) # Sensitivity/Specificity/Recall
+
+##############
+
+# Plot results of performance data
+plot_results <- ggplot(data = confusion_matrix,
+                       mapping = aes(x = Var2,
+                                     y = Var1)) +
+  
+  geom_tile(aes(fill = Freq),
+            show.legend = FALSE) +
+  
+  geom_text(aes(label = as.character(Freq)), vjust = 1) +
+  
+  scale_fill_gradient(low = "white",
+                      high = "forestgreen",
+                      trans = "log") +
+  # Label x and y axis
+  labs(title = 'Test Data Confusion Matrix',
+       x = "Actual",
+       y = "Prediction") + 
+  
+  # Increase axis text size
+  theme(title = element_text(size = 16, face = 'bold'),
+        axis.title = element_text(size = 16, face = 'bold'), 
+        axis.text = element_text(size = 14))
+
+print(plot_results)
+
+grid.arrange(RF_stats_Table)
+grid.arrange(RF_stats_Table2)
+
+top_10000 <- rownames(importance_value)
+
+save(file = 'Top_10000_Pruned_RF_Model.RData',
+     Top_10000_classifier_RF_pruned)
+```
+
+### Determine the top 1000 genes by permutation importance and retrain the random forest model
+
+```{r}
+# Determine top genes influencing model
+importance <- vip(Top_10000_classifier_RF_pruned, 
+                  num_features = ncol(rf_prune[2:ncol(rf_prune)]))
+
+# Isolate importance values and gene IDs
+importance_value <- cbind(importance[["data"]]$Variable, importance[["data"]]$Importance)
+importance_value <- data.frame(as.numeric(importance_value[, 2]), row.names = importance_value[, 1])
+colnames(importance_value)[1] <- 'Importance'
+
+# Isolate top 1000 genes by importance
+importance_value <- importance_value %>% arrange(desc(Importance)) %>% slice(1:1000)
+
+# Prune rf data frame, preserving only filtered variables
+rf_prune <- rf[, colnames(t(importance_value))]
+
+# Add polarization information for RF
+rf_prune <- cbind(MDM_df$ID, rf_prune)
+colnames(rf_prune)[1] <- 'ID'
+
+train <- train[, colnames(t(importance_value))]
+train <- cbind(MDM_df[rownames(train), ]$ID, train)
+colnames(train)[1] <- 'ID'
+
+test <- test[, colnames(t(importance_value))]
+test <- cbind(MDM_df[rownames(test), ]$ID, test)
+colnames(test)[1] <- 'ID'
+
+train$ID <- factor(train$ID, 
+                   levels = c('M0', 
+                              'IFN', 'LPS', 'LPS_IFN'))
+
+test$ID <- factor(test$ID, 
+                  levels = c('M0', 
+                             'IFN', 'LPS', 'LPS_IFN'))
+
+rf_prune$ID <- factor(rf_prune$ID, 
+                      levels = c('M0', 
+                                 'IFN', 'LPS', 'LPS_IFN'))
+
+best.m = sqrt(nrow(importance_value))
+
+# Run the RF model through ranger package
+Top_1000_classifier_RF_pruned <- ranger(x = train[-1], 
+                                         y = as.factor(train$ID),
+                                         num.trees = 1500, 
+                                         max.depth = 15, 
+                                         mtry = best.m, 
+                                         case.weights = weight,
+                                         importance = 'permutation')
+
+print(Top_1000_classifier_RF_pruned)
+
+# Determine top genes influencing model
+importance <- vip(Top_1000_classifier_RF_pruned, 
+                  num_features = ncol(rf_prune[2:ncol(rf_prune)]))
+
+# Assess confusion matrices
+p2 <- predict(Top_1000_classifier_RF_pruned, test)
+confusionMatrix(p2$predictions, as.factor(test$ID))
+
+################################################################################
+
+# Add predictions to test data set
+predicted <- cbind(data.frame(class_preds = p2), test)
+
+# Create a confusion matrix of test data predictions and IDs
+confusion_matrix <- as.data.frame(table(p2$predictions, test$ID))
+
+bin_cm <- ConfusionTableR::binary_class_cm(predicted$prediction,
+                                           predicted$ID)
+
+# Isolate model performance data
+RF_Stats <- data.frame(bin_cm[["confusion_matrix"]][["overall"]][1:5])
+colnames(RF_Stats) <- ''
+
+RF_Stats2 <- data.frame(bin_cm[["confusion_matrix"]][["byClass"]])
+RF_Stats2 <- RF_Stats2[, 1:7]
+
+# Create tables of performance data
+RF_stats_Table <- tableGrob(t(round(RF_Stats, 4))) # Accuracy
+RF_stats_Table2 <- tableGrob(round(RF_Stats2, 2)) # Sensitivity/Specificity/Recall
+
+##############
+
+# Plot results of performance data
+plot_results <- ggplot(data = confusion_matrix,
+                       mapping = aes(x = Var2,
+                                     y = Var1)) +
+  
+  geom_tile(aes(fill = Freq),
+            show.legend = FALSE) +
+  
+  geom_text(aes(label = as.character(Freq)), vjust = 1) +
+  
+  scale_fill_gradient(low = "white",
+                      high = "forestgreen",
+                      trans = "log") +
+  # Label x and y axis
+  labs(title = 'Test Data Confusion Matrix',
+       x = "Actual",
+       y = "Prediction") + 
+  
+  # Increase axis text size
+  theme(title = element_text(size = 16, face = 'bold'),
+        axis.title = element_text(size = 16, face = 'bold'), 
+        axis.text = element_text(size = 14))
+
+print(plot_results)
+
+grid.arrange(RF_stats_Table)
+grid.arrange(RF_stats_Table2)
+
+top_1000 <- rownames(importance_value)
+
+save(file = 'Top_1000_Pruned_RF_Model.RData',
+     Top_1000_classifier_RF_pruned)
+
+# Save the top 1000 genes by permutation importance for heatmap generation
+save(file = 'Top_1000_RF_Genes.RData',
+     top_1000, 
+     MDM_df)
+```

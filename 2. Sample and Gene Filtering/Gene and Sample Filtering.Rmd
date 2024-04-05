@@ -1,0 +1,284 @@
+---
+title: "Gene and Sample Filtering"
+author: "Timothy Smyth"
+date: "2024-03-27"
+output: html_document
+---
+
+# Gene and Sample filtering of Monocyte-Derived Macrophage Samples
+
+### This file takes the count data from all M0, M1, and M2 samples isolated from "MDM Selectiona and Sorting" and filters genes and samples for differential expression and random forest modeling. Genes are filtered with the edgeR function filterByExpr() using default parameters which determines whether each gene has sufficiently large counts across a sufficient number of samples. Samples are filtered using dendrogram clustering, retaining samples with a pearson correlation of at least 0.75 within each polarization method. Resulting data is either saved as raw count data for differential expression or corrected for batch effect for use in random forest modeling and further downstream analysis.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Environment setup
+
+```{r message = FALSE}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+# Load packages
+library(tidyverse) # for data cleaning
+library(dplyr) 
+library(broom)
+library(tibble)
+library(edgeR)
+library(RColorBrewer) # for color palette
+library(dendextend)
+library(factoextra)
+library(limma)
+```
+
+### Load and format count data
+
+```{r}
+# Load MDM data
+load("MDM_Data_by_Polarization.RData")
+
+# Isolate polarization methods (termed ID in data frame) of interest
+# These methods were selected due to their widespread use to induce M1 or M2 polarization states in the literature
+MDM_df <- MDM_df %>% subset(ID == 'M0' |
+                              ID == 'LPS' |
+                              ID == 'IFN' |
+                              ID == 'LPS_IFN' |
+                              ID == 'IL4' |
+                              ID == 'IL10' | 
+                              ID == 'IL13' |
+                              ID == 'IL4_IL13')
+
+head(MDM_df)
+
+# Move 'polarization' (referring to M0, M1, or M2 polarization state) to the first column
+MDM_df <- MDM_df %>% select(polarization, everything())
+
+# Set series_id and polarization state to a factor
+MDM_df$series_id <- gsub(",", "_", MDM_df$series_id) %>% factor()
+MDM_df$polarization <- factor(MDM_df$polarization)
+MDM_df$ID <- factor(MDM_df$ID)
+
+# Isolate sample info and set to factor
+info <- MDM_df %>% subset(select = c(1:3))
+
+# Save sample name
+names <- rownames(MDM_df)
+
+# Subset data to remove metadata, set count data to numeric, and set to a data frame
+MDM_df <- MDM_df %>% subset(select = -c(1:3))
+MDM_df <- sapply(MDM_df, as.numeric)
+MDM_df <- t(data.frame(MDM_df, row.names = names))
+
+# Define GEO series as a factor
+series <- factor(info$series_id)
+polarization <- factor(info$polarization, levels = c('M0', 'M1', 'M2'))
+pol_method <- factor(info$ID, 
+                     levels = c('M0', 
+                                'LPS', 'IFN', 'LPS_IFN',  
+                                'IL4', 'IL10', 'IL13', 'IL4_IL13'))
+```
+
+### Filter genes without sufficiently large counts across samples using filterByExpr
+
+```{r}
+# Create DGEList object
+d0 <- DGEList(as.matrix(MDM_df), 
+              group = pol_method)
+
+# Calculate normalization factor
+d0 <- calcNormFactors(d0)
+
+# Use EdgeR function to automatically select genes to retain
+# This gives logical values to keep or remove
+keep.exprs <- filterByExpr(d0, 
+                           group = pol_method)
+
+# Remove filtered genes
+d0 <- d0[keep.exprs, ]
+
+# Recalculate normalization factor
+d0 <- calcNormFactors(d0)
+
+# Calculate logCPM of filtered gene set
+lcpm <- cpm(d0, log = TRUE)
+
+# Isolate names of genes retained and save for future analysis
+gene_universe <- rownames(lcpm)
+
+save(file = 'Gene_universe.RData', 
+     gene_universe)
+
+# Add polarization information and series_ID
+lcpm <- as.data.frame(t(lcpm))
+lcpm <- cbind(info, lcpm)
+
+colnames(lcpm)[1:3] <- c('polarization', 
+                         'series_id', 
+                         'ID')
+```
+
+### Fitler samples through dendrogram clustering. Samples are split into groups based on the identified polarization method and pearson correlations are calculated. Dendrograms are constructed based on these between sample correlation coefficients and dendrograms are cut at heights of 0.25, corresponding to a pearson correlation of at least 0.75. Samples from the largest dendrogram cluster are retained for downstream analysis
+
+```{r}
+# Isolate polarization method names for clustering
+list <- as.list(unique(as.character(lcpm$ID)))
+
+dend <- lapply(list, function(x){
+  
+  # Isolate samples from single polarization method
+  tmp <- lcpm %>% subset(ID == x) 
+  names <- rownames(tmp)
+  tmp_series <- tmp$series_id
+  
+  # Remove metadata, convert count data to numeric, and set sample to row names
+  tmp <- tmp %>% 
+    subset(select = -c(1:3)) %>% 
+    as.data.frame(row.names = names)
+ 
+  # Calculate sample correlation and create dendrograms
+  tmp_dend <- cor(t(tmp))
+  tmp_dend <- as.dendrogram(hclust(as.dist(1 - tmp_dend)))
+  
+  # Isolate each unique GEO series ID
+  useries = unique(tmp_series)
+  
+  # Match unique series to series list and record row location of each series
+  series_match = useries[match(tmp_series, useries)]
+  
+  # Set colors
+  colos <- colorspace::rainbow_hcl(length(tmp_series), 
+                                   c = 160, 
+                                   l  = 50)
+  # Set colors to series ID
+  names(colos) = tmp_series
+  
+  # Set matched colors
+  series_color <- colos[series_match]
+  
+  # Create clusters
+  clu = cutree(tmp_dend, 
+               h = 0.25) # Height for cut (1 - correlation coefficient)
+  
+  # Set colors of labels
+  labels_colors(tmp_dend) <- series_color[order.dendrogram(tmp_dend)]
+  
+  # Create dendrograms
+  tmp_dend <- color_branches(tmp_dend, 
+                             h = 0.25) # Height of cut (1 - correlation coefficient)
+  
+  # Set plot dimmensions
+  par(mar = c(4,1,1,12))
+  
+  # Plot dendrograms
+  plot(tmp_dend,
+       main = as.character(x),
+       horiz = TRUE) +
+    
+    abline(v = 0.25, lty = 2)
+  
+  # Create color bar to show cluster and series ID of samples
+  colored_bars(cbind(clu, 
+                     series_color), 
+               tmp_dend, 
+               rowLabels = c("Cluster", "Series"), 
+               horiz = TRUE)
+  
+  # Isolate samples from single polarization method
+  tmp <- lcpm %>% subset(ID == x)
+  
+  # Add cluster number information to data
+  tmp <- cbind(clu, tmp)
+  colnames(tmp)[1] <- 'cluster'
+  tmp <- tmp %>% select(ID, everything())
+  
+  # Determine the largest cluster and isolate samples in that cluster
+  largest_cluster = names(rev(sort(table(tmp$cluster))))[1]
+  samples = which(tmp$cluster == largest_cluster)
+  tmp[samples, ]
+  
+})
+
+Selected_MDM_df <- do.call(rbind, dend) %>% 
+  subset(select = -c(2)) # Remove cluster number
+
+info <- info[rownames(Selected_MDM_df), ] # Remove info from removed samples
+MDM_df <- t(MDM_df[keep.exprs, rownames(info)]) # Isolate raw count data for selected genes and samples
+
+save(file = 'Selected_Count_Data.RData', 
+     MDM_df,
+     info)
+```
+
+### Perform batch correction using limma function removeBatchEffect using experimental Series_ID as the batch designation.
+
+```{r}
+info <- Selected_MDM_df[1:3]
+
+# Create model matrix to remove batch effects
+Design <- model.matrix(~ ID, 
+                       data = info)
+
+# Set series to factor for removeBatchEffect
+info$series <- factor(info$series)
+
+Batched_MDM_df <- t(Selected_MDM_df[4:ncol(Selected_MDM_df)])
+
+# Remove batch effects caused by experimental series. 
+# Requires samples as columns
+Batched_MDM_df <- removeBatchEffect(Batched_MDM_df,
+                                    batch = info$series,
+                                    design = Design)
+
+Batched_MDM_df <- data.frame(info, t(Batched_MDM_df))
+
+save(file = 'Batched_Data_Select_Method.RData', 
+     Batched_MDM_df,
+     info)
+```
+
+### Create density plots for Supplemental Figure S1
+
+```{r}
+# Create density plots for sample data correlation at baseline, 
+# following sample selection, and following batch correction
+lapply(list, function(x){
+  
+  # Isolate pre-selected samples from single polarization method
+  pre <- lcpm %>% subset(ID == x)
+  pre <- pre[, 4:ncol(pre)]
+  
+  # Isolate post-selected samples from single polarization method
+  post <- Selected_MDM_df %>% subset(ID == x)
+  post <- post[, 4:ncol(post)]
+  
+  # Isolate batch corrected samples from single polarization method
+  batch <- Batched_MDM_df %>% subset(ID == x)
+  batch <- batch[, 5:ncol(batch)]
+
+  # Plot density plots
+  plot(density(cor(t(pre))), 
+       lwd = 3, 
+       main = paste0("Correlation of All ", x, " Samples"), 
+       col = "red",
+       ylim = c(0,30))
+  
+  lines(density(cor(t(post))), 
+        lwd = 3, 
+        main = paste0("Correlation of Selected ", x, " Samples"), 
+        col = "blue")
+  
+  lines(density(cor(t(batch))), 
+        lwd = 3, 
+        main = paste0("Correlation of Batched ", x, " Samples"),
+        col = "forestgreen")
+  
+  abline(v = 0.75, col = "black")
+  
+  legend("topleft", 
+         legend = c("All Samples", "Selected Samples", "Batch Corrected Selected Samples"), 
+         lty = 1, 
+         lwd = 3, 
+         col = c("red", "blue", "forestgreen"))
+  
+})
+```
+

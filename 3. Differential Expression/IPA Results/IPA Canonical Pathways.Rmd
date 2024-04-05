@@ -1,0 +1,295 @@
+---
+title: "IPA Canonical Pathways"
+author: "Timothy Smyth"
+date: "2024-03-27"
+output: html_document
+---
+
+# Ingenuity Pathway Analysis: Canonical Pathways
+
+### This file describes further analysis of canonical pathway results from Ingenuity Pathway Analysis. Differentially expressed genes from 'Differential Expression by Polarization State' or 'Differential Expression by Polarization Method' were uploaded to Ingenuity Pathway Analysis with DEG cutoffs of BH adjusted p-values of 0.05 and log2 Fold Change values of >= 2 or <= -2. IPA core analysis was perfromed on each differential expression comparison (i.e. M1 vs M0) and the resulting analysis was downloaded as an excel file. Input for this file are the resulting IPA excel results.
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Environment setup
+
+```{r message = FALSE}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+# Load packages
+library(tidyverse) # for data cleaning
+library(dplyr) 
+library(readxl)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+### Load data
+
+This requires additional setup to run. The working directory has to be set to the specific folder containing IPA results, and the working directory must also be added in paste0(). As a note, / is required at the end of the first section of paste0().
+
+```{r}
+# Create a list of the files from your target directory
+file_list <- list.files(path = '---')
+
+list <- list()
+
+# Read each file into a separate data frame
+for(i in 1:length(file_list)){
+  
+  list[[i]] <- as.data.frame(read_excel(paste0(''---'', 
+                                               file_list[i]), 
+                                        col_types = 'text'))
+  
+}
+
+# Remove the first 21 rows of each object which contains IPA metadata
+list <- lapply(list, function(x){
+  
+  tmp <- x[-c(1:21), ] # Remove first 21 rows
+  row.names(tmp) = seq(1, nrow(tmp), by = 1) # Set rownames to sequential order of 1 to nrow
+  tmp
+  
+})
+
+# Set names of data frames to file names
+names(list) <- substr(file_list, 
+                      1, 
+                      nchar(file_list) - 4)
+```
+
+### Isolate canonical pathway results
+
+```{r}
+IPA_Results <- lapply(list, function(x){
+  
+  # ID the row and column number with the indicated text
+  # These correspond to the IPA readouts
+  Analysis <- which(x == 'Analysis', arr.ind = TRUE)
+  
+  # Subset from row 1 to 2 rows before 'Analysis' text (last data point)
+  Ingenuity_Canonical_Pathways <- x[c(1:as.numeric(Analysis[1]-2)), 
+                                    c(1:ncol(x))] 
+
+  # Combine all isolated readouts into one list
+  tmp <- list(Ingenuity_Canonical_Pathways)
+  
+  # Rename list objects to match what it is
+  names(tmp) <- c('Ingenuity_Canonical_Pathways')
+  
+  tmp <- lapply(names(tmp), function(y){
+    
+    names(tmp[[y]]) <- lapply(tmp[[y]][1, ], as.character) # Set colnames to names in first row
+    tmp[[y]] <- as.data.frame(tmp[[y]][-1, ]) # Remove first row which only contains colnames
+    keep.cols <- names(tmp[[y]]) %in% c("") # ID columns with blank names
+    tmp[[y]] <- tmp[[y]][!keep.cols] # Remove columns without names
+    row.names(tmp[[y]]) = seq(1, nrow(tmp[[y]]), by = 1) # Reset row names
+    tmp[[y]]
+    
+  })
+  
+  # Rename list objects to match what it is
+  names(tmp) <- c('Ingenuity_Canonical_Pathways')
+  
+  tmp
+  
+})
+
+# Apply function to round z scores to 3 digits, reorder columns, and 
+# subset by significantly differences (-log(p) > 1.3 = p<0.05)
+Canonical <- lapply(names(IPA_Results), function(x){
+  
+  # Isolate the first position of the IPA results (Canonical Pathways)
+  tmp <- IPA_Results[[x]][[1]]
+  
+  colnames(tmp) <- c('Pathway', 
+                     'Neg.log.10.p', 
+                     'zScore', 
+                     'Ratio')
+
+  # Set z score to numeric
+  tmp$zScore <- as.numeric(tmp$zScore)
+  
+  # Round to 3 digits
+  tmp$zScore <- round(tmp$zScore, 3)
+  
+  # Reorganize data and keep only significantly different pathways
+  tmp <- tmp[, c(1, 3, 4, 2)] %>% 
+    subset(tmp$Neg.log.10.p >= 1.3)
+  
+  # Set names of columns
+  colnames(tmp) <- c('Pathway',
+                     paste0(as.character(x), ' zScore'),
+                     paste0(as.character(x), ' Ratio'),
+                     paste0(as.character(x), ' Neg.log.10.p'))
+  
+  # Save the results to Canonical list
+  tmp
+  
+})
+
+# Set names of list object to corresponding source
+names(Canonical) <- substr(file_list, 
+                           1, 
+                           nchar(file_list) - 4)
+```
+
+### Isolate the top 10 canonical pathways by p-value of each comparison
+
+```{r}
+Top_pathways <- lapply(names(IPA_Results), function(x){
+  
+  # Isolate the first position of the IPA results (Canonical Pathways)
+  tmp <- IPA_Results[[x]][[1]]
+  
+  colnames(tmp) <- c('Pathway', 
+                     'Neg.log.10.p', 
+                     'zScore', 
+                     'Ratio')
+  
+  # Set to numeric
+  tmp$zScore <- as.numeric(tmp$zScore)
+  tmp$Neg.log.10.p <- as.numeric(tmp$Neg.log.10.p)
+  tmp$Ratio <- as.numeric(tmp$Ratio)
+  
+  # Round to 3 digits
+  tmp$zScore <- round(tmp$zScore, 3)
+  
+  # Reorganize data and keep only significantly different pathways
+  tmp <- tmp[, c(1, 3, 4, 2)] %>% 
+    subset(tmp$Neg.log.10.p >= 1.3)
+  
+  tmp <- tmp %>% arrange(desc(Neg.log.10.p))
+  
+  # Set names of columns
+  colnames(tmp) <- c('Pathway',
+                     paste0(as.character(x), ' zScore'),
+                     paste0(as.character(x), ' Ratio'),
+                     paste0(as.character(x), ' Neg.log.10.p'))
+  
+  # Save the results to Canonical list
+  tmp[1:10, ]
+  
+})
+
+# Set names of list object to corresponding source
+names(Top_pathways) <- substr(file_list, 
+                              1, 
+                              nchar(file_list) - 4)
+```
+
+### Isolate the pathway z-scores for each of the top 10 pathways isolated above. NA z-scores represent pathways for which z-scores could not be calculated.
+
+```{r}
+# Merge top pathways removing repeats
+merge <- Reduce(function(x, y) merge(x, y, all = TRUE), Top_pathways)
+Pathways <- merge$Pathway
+
+zScore <- Reduce(function(x, y) merge(x, y, all = TRUE), Canonical) # Merge all canonical pathway results
+
+zScore <- data.frame(zScore[, c(2, 
+                                5, 
+                                8 # Three groups
+                                ,
+                                11 # Four groups
+                                # ,
+                                # 14 # Five groups
+                                # ,
+                                # 17 # Six groups
+                                
+                                )], row.names = zScore$Pathway) # Isolate Z scores
+
+zScore <- zScore[Pathways, ] # Save Z scores for top pathways
+
+# Remove Z scores with all NA values
+Remove <- zScore %>% filter_all(all_vars(is.na(.))) %>% rownames()
+zScore <- zScore[!(row.names(zScore) %in% Remove), ]
+
+# Calculate variance between groups and remove pathways with no variance between samples
+var <- as.data.frame(sapply(as.data.frame(t(zScore)), var))
+var <- var %>% subset(var[, 1] == 0)
+
+zScore <- zScore[!(row.names(zScore) %in% row.names(var)), ]
+
+# Set the colnames according to the input data set
+colnames(zScore) <- c('---')
+
+# Reorganize the columns based on desired heatmap output
+zScore <- zScore[, c('---')]
+```
+
+### Generate heatmap of the resulting z-scores
+
+```{r}
+# Set color palette for heatmap
+myCol <- colorRamp2(c(-5, 0, 5), hcl_palette = "Vik")
+
+hmap1 <- Heatmap(as.matrix(zScore),
+                 
+                 width = ncol(zScore) * unit(50, 'mm'), 
+                 height = ncol(zScore) * unit(125, 'mm'),
+                 
+                 name = 'Canonical Pathway\nZ-Score',
+                 
+                 # Color scheme
+                 col = myCol,
+                 
+                 # Set color for NA values
+                 na_col = "pink",
+                 
+                 # Add values to boxes
+                 # Use black or white text based on value
+                 cell_fun = function(j, i, x, y, width, height, fill) {
+                   grid.text(sprintf("%.1f", zScore[i, j]), x, y, gp = gpar(fontsize = 24, 
+                                                                            col = if_else(zScore[i, j] < 3 & 
+                                                                                            zScore[i, j] > -3 | 
+                                                                                            is.na(zScore[i, j]) == TRUE, 
+                                                                                          'black', 
+                                                                                          'white'),
+                                                                            fontface = 'bold'))},
+                 
+                 # parameters for the color-bar that represents gradient of expression
+                 heatmap_legend_param = list(
+                   color_bar = 'continuous',
+                   at = c(-5, -2.5, 0, 2.5, 5),
+                   legend_direction = 'horizontal',
+                   legend_width = unit(15, 'cm'),
+                   legend_height = unit(10.0, 'cm'),
+                   title_position = 'topcenter',
+                   title_gp = gpar(fontsize = 24, fontface = 'bold'),
+                   labels_gp = gpar(fontsize = 20, fontface = 'bold')),
+                 
+                 # row (gene) parameters
+                 cluster_rows = FALSE,
+                 show_row_dend = FALSE,
+                 row_title_side = 'right',
+                 row_title_gp = gpar(fontsize = 12,  fontface = 'bold'),
+                 show_row_names = TRUE,
+                 row_names_gp = gpar(fontsize = 20, fontface = 'bold'),
+                 row_names_side = 'right',
+                 row_dend_width = unit(30,'mm'),
+                 
+                 # column (sample) parameters
+                 cluster_columns = FALSE,
+                 show_column_dend = FALSE,
+                 column_title = '',
+                 column_title_side = 'bottom',
+                 column_title_gp = gpar(fontsize = 12, fontface = 'bold'),
+                 show_column_names = TRUE,
+                 column_names_gp = gpar(fontsize = 30, fontface = 'bold'),
+                 column_names_rot = 45,
+                 column_names_max_height = unit(10, 'cm'))
+
+tiff(file = "Heatmap.tiff", 
+     height = 2000, 
+     width = 2500)
+
+draw(hmap1,
+     heatmap_legend_side = 'top')
+
+dev.off()
+```
+
+
