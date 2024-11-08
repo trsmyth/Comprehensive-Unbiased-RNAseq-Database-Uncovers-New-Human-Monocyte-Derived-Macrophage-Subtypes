@@ -1,0 +1,408 @@
+---
+title: "IPA Canonical Pathways"
+author: "Timothy Smyth"
+date: "2024-03-27"
+output: html_document
+---
+
+# Ingenuity Pathway Analysis: Canonical Pathways
+
+### This file describes further analysis of canonical pathway results from Ingenuity Pathway Analysis. Differentially expressed genes from 'Differential Expression by Polarization State' or 'Differential Expression by Polarization Method' were uploaded to Ingenuity Pathway Analysis with DEG cutoffs of BH adjusted p-values of 0.05 and log2 Fold Change values of >= 2 or <= -2. IPA core analysis was perfromed on each differential expression comparison (i.e. M1 vs M0) and the resulting analysis was downloaded as an excel file. Input for this file are the resulting IPA excel results.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Environment setup
+
+```{r, message = FALSE}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+# Load packages
+library(tidyverse) # for data cleaning
+library(dplyr) 
+library(readxl)
+library(ComplexHeatmap)
+library(circlize)
+library(openxlsx)
+library(eulerr)
+```
+
+### Load data
+
+This requires additional setup to run. The working directory has to be set to the specific folder containing IPA results, and the working directory must also be added in paste0(). As a note, / is required at the end of the first section of paste0().
+
+```{r}
+# Create a list of folders containing IPA data
+# All IPA folders should exist as separate sub folders in the same folder
+Groupings <- c('By Polarization State', 
+               'M1 vs M0', 
+               'M1 vs M1', 
+               'M2 vs M0', 
+               'M2 vs M2')
+
+# Create a list of the files from your target directory
+file_list <- lapply(Groupings, function(DE_Group){
+  
+  # Define file path for data folders
+    file_names <- list.files(path = paste0("---", 
+                             DE_Group))
+    
+    Group_storage_list <- list()
+    
+    # Read each file into a separate data frame
+    for(i in 1:length(file_names)){
+      
+      # Create a temporary data frame containing data from each file
+      Tmp_df <- as.data.frame(read_excel(paste0('---',
+                                                                 DE_Group, 
+                                                                 '/',
+                                                                 file_names[[i]]), 
+                                                          col_types = 'text'))
+      
+      # Remove first 21 rows
+      Tmp_df <- Tmp_df[-c(1:21), ]
+      
+      # Set rownames to sequential order of 1 to nrow
+      row.names(Tmp_df) = seq(1, 
+                              nrow(Tmp_df), 
+                              by = 1) 
+      
+      # Save the temporary data frame to the storage list
+      Group_storage_list[[i]] <- Tmp_df
+      
+      }
+    
+    # Set the names of the data frames to match the source file
+    names(Group_storage_list) <- substr(file_names,
+                                        1,
+                                        nchar(file_names) - 4)
+    
+    # Save the data frames from each grouping to the same list
+    Group_storage_list
+  
+})
+
+# Rename the list to match the groups
+names(file_list) <- Groupings
+```
+
+### Format IPA results for isolation of canonical pathway results
+
+```{r}
+IPA_Results <- lapply(Groupings, function(IPA_Grouping){
+  
+  IPA_Results <- lapply(file_list[[IPA_Grouping]], function(Individual_file){
+    
+    # ID the row and column number with the indicated text
+    # These correspond to the IPA readouts
+    Analysis <- which(Individual_file == 'Analysis', arr.ind = TRUE)
+    
+    # Subset from row 1 to 2 rows before 'Analysis' text (last data point)
+    Ingenuity_Canonical_Pathways <- Individual_file[c(1:as.numeric(Analysis[1]-2)), 
+                                                    c(1:ncol(Individual_file))] 
+    
+    # Set colnames to names in first row
+    names(Ingenuity_Canonical_Pathways) <- lapply(Ingenuity_Canonical_Pathways[1, ], 
+                                                  as.character) 
+    
+    # Remove first row which only contains colnames
+    Ingenuity_Canonical_Pathways <- as.data.frame(Ingenuity_Canonical_Pathways[-1, ]) 
+    
+    # ID columns with blank names
+    keep.cols <- names(Ingenuity_Canonical_Pathways) %in% c("") 
+    
+    # Remove columns without names
+    Ingenuity_Canonical_Pathways <- Ingenuity_Canonical_Pathways[!keep.cols] 
+    
+    # Reset row names
+    row.names(Ingenuity_Canonical_Pathways) = seq(1, 
+                                                  nrow(Ingenuity_Canonical_Pathways), 
+                                                  by = 1) 
+    
+    Ingenuity_Canonical_Pathways
+    
+    })
+  
+})
+
+# Rename the list to match the groups
+names(IPA_Results) <- Groupings
+```
+
+### Isolate canonical pathway results from formatted IPA data
+
+```{r}
+# Apply function to round z scores to 3 digits, reorder columns, and 
+# subset by significantly differences (-log(p) > 1.3 = p<0.05)
+Canonical <- lapply(Groupings, function(IPA_Grouping){
+  
+  Canonical <- lapply(names(IPA_Results[[IPA_Grouping]]), function(Individual_file){
+  
+    # Isolate the first position of the IPA results (Canonical Pathways)
+    Ingenuity_Canonical_Pathways <- IPA_Results[[IPA_Grouping]][[Individual_file]]
+    
+    colnames(Ingenuity_Canonical_Pathways) <- c('Pathway', 
+                                                'Neg.log.10.p', 
+                                                'zScore', 
+                                                'Ratio')
+  
+    # Set z score to numeric
+    Ingenuity_Canonical_Pathways$zScore <- as.numeric(Ingenuity_Canonical_Pathways$zScore)
+    
+    # Round to 3 digits
+    Ingenuity_Canonical_Pathways$zScore <- round(Ingenuity_Canonical_Pathways$zScore, 
+                                                 3)
+    
+    # Reorganize data and keep only significantly different pathways
+    Ingenuity_Canonical_Pathways <- Ingenuity_Canonical_Pathways[, c(1, 3, 4, 2)] %>% 
+      subset(Ingenuity_Canonical_Pathways$Neg.log.10.p >= 1.3)
+    
+    # Set names of columns
+    colnames(Ingenuity_Canonical_Pathways) <- c('Pathway',
+                                                paste0(Individual_file, ' zScore'),
+                                                paste0(Individual_file, ' Ratio'),
+                                                paste0(Individual_file, ' Neg.log.10.p'))
+    
+    # Save the results to Canonical list
+    Ingenuity_Canonical_Pathways
+    
+  })
+  
+})
+
+# Rename the list to match the groups
+names(Canonical) <- Groupings
+```
+
+### Isolate the top 10 canonical pathways by p-value of each comparison
+
+```{r}
+Top_pathways <- lapply(Groupings, function(IPA_Grouping){
+  
+  Top_pathways <- lapply(names(IPA_Results[[IPA_Grouping]]), function(Individual_file){
+    
+    # Isolate the first position of the IPA results (Canonical Pathways)
+    Ingenuity_Canonical_Pathways <- IPA_Results[[IPA_Grouping]][[Individual_file]]
+  
+    colnames(Ingenuity_Canonical_Pathways) <- c('Pathway', 
+                                                'Neg.log.10.p', 
+                                                'zScore', 
+                                                'Ratio')
+    
+    # Set to numeric
+    Ingenuity_Canonical_Pathways$zScore <- as.numeric(Ingenuity_Canonical_Pathways$zScore)
+    Ingenuity_Canonical_Pathways$Neg.log.10.p <- as.numeric(Ingenuity_Canonical_Pathways$Neg.log.10.p)
+    Ingenuity_Canonical_Pathways$Ratio <- as.numeric(Ingenuity_Canonical_Pathways$Ratio)
+    
+    # Round to 3 digits
+    Ingenuity_Canonical_Pathways$zScore <- round(Ingenuity_Canonical_Pathways$zScore, 3)
+    
+    # Reorganize data and keep only significantly different pathways
+    Ingenuity_Canonical_Pathways <- Ingenuity_Canonical_Pathways[, c(1, 3, 4, 2)] %>% 
+      subset(Ingenuity_Canonical_Pathways$Neg.log.10.p >= 1.3)
+    
+    Ingenuity_Canonical_Pathways <- Ingenuity_Canonical_Pathways %>% arrange(desc(Neg.log.10.p))
+    
+    # Set names of columns
+    colnames(Ingenuity_Canonical_Pathways) <- c('Pathway',
+                                                paste0(as.character(Individual_file), ' zScore'),
+                                                paste0(as.character(Individual_file), ' Ratio'),
+                                                paste0(as.character(Individual_file), ' Neg.log.10.p'))
+    
+    # Save the results to Canonical list
+    Ingenuity_Canonical_Pathways <- Ingenuity_Canonical_Pathways[1:10, ]
+    
+  })
+  
+  names(Top_pathways) <- names(IPA_Results[[IPA_Grouping]])
+  
+  Top_pathways
+  
+})
+
+# Rename the list to match the groups
+names(Top_pathways) <- Groupings
+```
+
+### Isolate the pathway z-scores for each of the top 10 pathways isolated above. NA z-scores represent pathways for which z-scores could not be calculated.
+
+```{r}
+zScore <- lapply(Groupings, function(IPA_Grouping){
+
+  # Merge top pathways removing repeats
+  merge <- Reduce(function(x, y) merge(x, y, all = TRUE), Top_pathways[[IPA_Grouping]])
+  Pathways <- merge$Pathway
+  
+  # Merge all canonical pathway results
+  zScore <- Reduce(function(x, y) merge(x, y, all = TRUE), Canonical[[IPA_Grouping]]) 
+  
+  # Isolate Z scores
+  zScore <- data.frame(zScore[, seq(from = 2, 
+                                    to = ncol(zScore) - 1, 
+                                    by = 3)], 
+                       row.names = zScore$Pathway) 
+  
+  # Save Z scores for top pathways
+  zScore <- zScore[Pathways, ] 
+  
+  # Remove Z scores with all NA values
+  Remove <- zScore %>% filter_all(all_vars(is.na(.))) %>% rownames()
+  zScore <- zScore[!(row.names(zScore) %in% Remove), ]
+  
+  # Calculate variance between groups and remove pathways with no variance between samples
+  var <- as.data.frame(sapply(as.data.frame(t(zScore)), var))
+  var <- var %>% subset(var[, 1] == 0)
+  zScore <- zScore[!(row.names(zScore) %in% row.names(var)), ]
+  
+  # Rename columns to match desired output
+  if(IPA_Grouping == 'By Polarization State'){
+
+    colnames(zScore) <- gsub(pattern = '\\.zScore',
+                                  replacement = '',
+                                  x = colnames(zScore))
+    
+    colnames(zScore) <- gsub(pattern = '\\.',
+                             replacement = ' ',
+                             x = colnames(zScore))
+  }
+
+  else{
+    if(IPA_Grouping == 'M1 vs M0' |
+       IPA_Grouping == 'M2 vs M0'){
+
+      colnames(zScore) <- gsub(pattern = '\\.zScore',
+                               replacement = '',
+                               x = colnames(zScore))
+      
+      colnames(zScore) <- gsub(pattern = 'M\\.',
+                               replacement = 'M(',
+                               x = colnames(zScore))
+      
+      colnames(zScore) <- gsub(pattern = '\\.',
+                               replacement = ')',
+                               x = colnames(zScore))
+
+    }
+
+    else{
+      
+      colnames(zScore) <- gsub(pattern = '\\.zScore',
+                               replacement = '',
+                               x = colnames(zScore))
+      
+      colnames(zScore) <- gsub(pattern = 'M\\.',
+                               replacement = 'M(',
+                               x = colnames(zScore))
+      
+      colnames(zScore) <- gsub(pattern = 'vs\\.',
+                               replacement = 'vs ',
+                               x = colnames(zScore))
+      
+      colnames(zScore) <- gsub(pattern = '\\.',
+                               replacement = ')',
+                               x = colnames(zScore))
+      
+      colnames(zScore) <- gsub(pattern = '))',
+                               replacement = ') ',
+                               x = colnames(zScore))
+      
+      }
+  }
+
+  zScore
+  
+})
+
+names(zScore) <- Groupings
+
+save(IPA_Results, 
+     Top_pathways, 
+     file = 'IPA_Results.RData')
+```
+
+### Generate heatmap of the resulting z-scores
+
+```{r}
+# Set color palette for heatmap
+myCol <- colorRamp2(c(-5, 0, 5), hcl_palette = "Vik")
+
+lapply(Groupings, function(IPA_Grouping){
+  
+  Heatmap_data <- as.matrix(zScore[[IPA_Grouping]])
+
+  hmap <- Heatmap(Heatmap_data,
+                   
+                   cluster_row_slices = FALSE,
+                   gap = unit(0.75, "mm"),
+                   border = TRUE,
+                   width = ncol(Heatmap_data) * unit(50, 'mm'), 
+                   height = ncol(Heatmap_data) * unit(125, 'mm'),
+                   
+                   name = 'Canonical Pathway\nZ-Score',
+                   
+                   # Color scheme
+                   col = myCol,
+                   
+                   # Set color for NA values
+                   na_col = "pink",
+                   
+                   # Add values to boxes
+                   # Use black or white text based on value
+                   cell_fun = function(j, i, x, y, width, height, fill) {
+                     grid.text(sprintf("%.1f", 
+                                       Heatmap_data[i, j]), x, y, 
+                               gp = gpar(fontsize = 24, 
+                                         col = if_else(Heatmap_data[i, j] < 3 & 
+                                                         Heatmap_data[i, j] > -3 | 
+                                                         is.na(Heatmap_data[i, j]) == TRUE, 
+                                                       'black', 
+                                                       'white'),
+                                         fontface = 'bold'))},
+                   
+                   # parameters for the color-bar that represents gradient of expression
+                   heatmap_legend_param = list(
+                     color_bar = 'continuous',
+                     at = c(-5, -2.5, 0, 2.5, 5),
+                     legend_direction = 'horizontal',
+                     legend_width = unit(15, 'cm'),
+                     legend_height = unit(10.0, 'cm'),
+                     title_position = 'topcenter',
+                     title_gp = gpar(fontsize = 24, fontface = 'bold'),
+                     labels_gp = gpar(fontsize = 20, fontface = 'bold')),
+                   
+                   # row (gene) parameters
+                   cluster_rows = FALSE,
+                   show_row_dend = FALSE,
+                   row_title_side = 'right',
+                   row_title_gp = gpar(fontsize = 12,  fontface = 'bold'),
+                   show_row_names = TRUE,
+                   row_names_gp = gpar(fontsize = 20, fontface = 'bold'),
+                   row_names_side = 'right',
+                   row_dend_width = unit(25,'mm'),
+                   
+                   # column (sample) parameters
+                   cluster_columns = FALSE,
+                   show_column_dend = FALSE,
+                   column_title = '',
+                   column_title_side = 'bottom',
+                   column_title_gp = gpar(fontsize = 12, fontface = 'bold'),
+                   show_column_names = TRUE,
+                   column_names_gp = gpar(fontsize = 30, fontface = 'bold'),
+                   column_names_rot = 45,
+                   column_names_max_height = unit(10, 'cm'),
+                   column_dend_height = unit(25,'mm'))
+  
+  tiff(file = paste0(IPA_Grouping, " Heatmap.tiff"), 
+       height = ifelse(IPA_Grouping == 'M2 vs M2', 
+                       2500,
+                       2000),
+       width = 2500)
+  
+  draw(hmap,
+       heatmap_legend_side = 'top')
+  
+  dev.off()
+
+})
+```
