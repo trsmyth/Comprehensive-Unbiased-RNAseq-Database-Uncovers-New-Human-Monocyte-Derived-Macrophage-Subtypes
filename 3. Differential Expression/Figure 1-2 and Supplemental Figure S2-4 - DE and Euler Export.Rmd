@@ -1,0 +1,573 @@
+---
+title: "Differential Expression Comparisons and Euler Plots"
+author: "Timothy Smyth"
+date: "2024-03-27"
+output: html_document
+---
+
+# Differential Expression Comparisons and Euler Plots
+
+### This file creates Euler plots for each comparison of interest (M1 vs M0, M1 vs M1, etc) for Figures 1-3 and Supplemental Figures S2-4
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Environment setup
+
+```{r, message = FALSE}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+# Load packages
+library(tidyverse) # for data cleaning
+library(dplyr) 
+library(readxl)
+library(ComplexHeatmap)
+library(circlize)
+library(openxlsx)
+library(eulerr)
+```
+
+### Load data
+
+```{r}
+load("Method_DEG_Results.RData")
+load("Pol_State_DEG_Results.RData")
+load("IPA_Results.RData")
+
+DEG_results <- c(Pol_DEG_Results, Method_DEG_Results)
+
+Groupings <- list('By Polarization State', 
+                  'M1 vs M0', 
+                  'M1 vs M1', 
+                  'M2 vs M0', 
+                  'M2 vs M2')
+
+names(DEG_results) <- gsub(pattern = ') vs M0', 
+                           replacement = ')', 
+                           x = names(DEG_results))
+```
+
+### Determine overlapping genes between each subset in each comparison (i.e. M(LPS) vs M0 for Figure 2, M(LPS) vs M(IFNg) for Supplemental Figure S4) for IPA
+
+```{r}
+IPA_Genes <- lapply(Groupings, function(IPA_Grouping){
+  
+  # Save the names of each individual group within larger groupings
+  names <- names(Top_pathways[[IPA_Grouping]])
+  
+  ########## Chunk 1: Isolate top 10 IPA canonical pathways and their input genes for each group ##########
+  
+  IPA_pathways <- lapply(Top_pathways[[IPA_Grouping]], function(Individual_group){
+    
+    Individual_group$Pathway
+    
+  })
+  
+  IPA_pathways <- unique(as.character(do.call(rbind, IPA_pathways))) %>% na.omit()
+
+  Top_pathway_molecules <- lapply(names(IPA_Results[[IPA_Grouping]]), function(Individual_group){
+    
+    Top_pathway_molecules <- data.frame(IPA_Results[[IPA_Grouping]][[Individual_group]][, c('Ingenuity Canonical Pathways', 'Molecules')],
+                                        row.names = IPA_Results[[IPA_Grouping]][[Individual_group]][, 'Ingenuity Canonical Pathways'])
+    
+    Top_pathway_molecules <- Top_pathway_molecules[IPA_pathways, ]
+    Top_pathway_molecules[is.na(Top_pathway_molecules)] <- 'NOT SIGNIFICANT'
+    rownames(Top_pathway_molecules) <- IPA_pathways
+    Top_pathway_molecules
+    
+  })
+  
+  names(Top_pathway_molecules) <- names
+  
+  ########## Chunk 2: Isolate significantly DE genes in each significant IPA pathway ##########
+
+  DE_Genes <- lapply(names, function(Group_name){
+
+    Genes <- DEG_results[[Group_name]] %>% subset(abs(log2FC) >= 2 & adj.P.Val < 0.05)
+    Genes <- Genes[, 'HUGO_IDs']
+    
+    Save_Genes <- list()
+
+    for(i in 1:nrow(Top_pathway_molecules[[Group_name]])){
+      
+      if(Top_pathway_molecules[[Group_name]][i, 'Molecules'] == 'NOT SIGNIFICANT'){
+        
+        Save_Genes[[i]] <- 'NOT SIGNIFICANT'
+        
+      }
+      
+      else{
+        
+        Pathway_Genes <- unlist(strsplit(Top_pathway_molecules[[Group_name]][i, 'Molecules'], ","))
+
+        keep = Genes %in% Pathway_Genes
+        keep = which(keep == TRUE)
+      
+        ifelse(length(keep) > 0,
+               Save_Genes[[i]] <- list(unique(Genes[keep])),
+               Save_Genes[[i]] <- 'NO GENES')
+      }
+
+    }
+
+    # Remove unwanted characters
+    Save_Genes <- as.character(do.call(rbind, Save_Genes)) %>% 
+      str_remove_all("[^[:UPPER:][[:digit:]], ]") %>% 
+      gsub(pattern = '\\,', replace = '\\, ') 
+    
+    DE_Genes <- data.frame(Save_Genes, 
+                           row.names = rownames(Top_pathway_molecules[[Group_name]]))
+    
+    colnames(DE_Genes) <- Group_name
+    
+    DE_Genes
+    
+  })
+  
+  names(DE_Genes) <- names
+  
+  DE_Genes <- data.frame(DE_Genes[1:length(DE_Genes)]) %>% 
+    rownames_to_column() %>% 
+    setNames(c('Pathway', names))
+  
+  # Rename columns to match desired output
+    if(IPA_Grouping == 'By Polarization State'){
+    
+    colnames(DE_Genes) <- gsub(pattern = '\\.',
+                             replacement = ' ',
+                             x = colnames(DE_Genes))
+    }
+  
+  if(IPA_Grouping == 'M1 vs M0' |
+     IPA_Grouping == 'M2 vs M0'){
+    
+    colnames(DE_Genes) <- gsub(pattern = 'M\\.',
+                             replacement = 'M(',
+                             x = colnames(DE_Genes))
+    
+    colnames(DE_Genes) <- gsub(pattern = '\\.',
+                             replacement = ')',
+                             x = colnames(DE_Genes))
+
+  }
+
+  else{
+    
+    colnames(DE_Genes) <- gsub(pattern = 'M\\.',
+                             replacement = 'M(',
+                             x = colnames(DE_Genes))
+    
+    colnames(DE_Genes) <- gsub(pattern = 'vs\\.',
+                             replacement = 'vs ',
+                             x = colnames(DE_Genes))
+    
+    colnames(DE_Genes) <- gsub(pattern = '\\.',
+                             replacement = ')',
+                             x = colnames(DE_Genes))
+    
+    colnames(DE_Genes) <- gsub(pattern = '))',
+                             replacement = ') ',
+                             x = colnames(DE_Genes))
+    
+  }
+  
+  DE_Genes
+
+})
+
+names(IPA_Genes) <- Groupings
+```
+
+### Isolate differentially expressed genes and sort based on upregulated or downregulated
+
+```{r}
+# Isolate DEGs
+All_DEGs <- lapply(DEG_results, function(Dataset){
+  
+  # Isolate upregulated genes and rename Ensembl column
+  up <- Dataset %>% subset(log2FC >= 2 & adj.P.Val < 0.05) %>% rownames_to_column()
+  colnames(up)[1] <- 'Ensembl_ID'
+  up <- up[, c(1, 6, 2:5)]
+
+  # Isolate downregulated genes and rename Ensembl column
+  down <- Dataset %>% subset(log2FC <= -2 & adj.P.Val < 0.05) %>% rownames_to_column()
+  colnames(down)[1] <- 'Ensembl_ID'
+  down <- down[, c(1, 6, 2:5)]
+  
+  # Save up and downregulated genes in a list and rename
+  Dataset <- list(up, down)
+  names(Dataset) <- c('Upregulated', 'Downregulated')
+  Dataset
+  
+})
+```
+
+### Isolate gene names for significantly differentially expressed inflammasome pathway linked genes
+
+```{r}
+Inflammasome <- read.csv('Inflammasome_List.csv')
+
+# As some HUGO names map to multiple Ensembl IDs, determine all Ensembl IDs in pathway and 
+# match up Ensembl IDs with HUGO IDs
+Inflammasome <- data.frame('Gene_ID' = rownames(Symbol)[which(Symbol$Genes.gene_name %in% 
+                                                                Inflammasome$HUGO_ID == TRUE)], 
+                           
+                           'HUGO_ID' = Symbol[which(Symbol$Genes.gene_name %in% 
+                                                                Inflammasome$HUGO_ID == TRUE), 
+                                              'Genes.gene_name'])
+
+Inflammasome <- lapply(names(All_DEGs), function(Dataset_name){
+  
+  Inflammasome <- lapply(c('Upregulated', 'Downregulated'), function(Dataset){
+    
+    keep <- which(All_DEGs[[Dataset_name]][[Dataset]]$Ensembl_ID %in% Inflammasome$Gene_ID == TRUE)
+    
+    genes <- data.frame('Ensembl_ID' = All_DEGs[[Dataset_name]][[Dataset]]$Ensembl, 
+                        'HUGO_IDs' = All_DEGs[[Dataset_name]][[Dataset]]$HUGO_IDs, 
+                        'log2FC' = All_DEGs[[Dataset_name]][[Dataset]]$log2FC,
+                        'adj.P.Val' = All_DEGs[[Dataset_name]][[Dataset]]$adj.P.Val)
+    
+    genes <- data.frame(genes[keep, ])
+    
+    genes
+    
+  })
+  
+  names(Inflammasome) <- c('Upregulated', 'Downregulated')
+  Inflammasome
+  
+})
+
+names(Inflammasome) <- names(All_DEGs)
+```
+
+### Isolate gene names for significantly differentially expressed transcription factors
+
+```{r}
+# https://humantfs.ccbr.utoronto.ca/download.php
+Transcription_Factors <- read.csv('Transcription_Factor_List.csv')
+
+# As some HUGO names map to multiple Ensembl IDs, determine all Ensembl IDs in pathway and 
+# match up Ensembl IDs with HUGO IDs
+Transcription_Factors <- data.frame('Gene_ID' = rownames(Symbol)[which(rownames(Symbol) %in% 
+                                                                         Transcription_Factors$Gene_ID == TRUE)], 
+                                    
+                                    'HUGO_ID' = Symbol[which(rownames(Symbol) %in% 
+                                                               Transcription_Factors$Gene_ID == TRUE), ])
+
+TFs <- lapply(names(All_DEGs), function(Dataset_name){
+  
+  TFs <- lapply(c('Upregulated', 'Downregulated'), function(Dataset){
+    
+    keep <- which(All_DEGs[[Dataset_name]][[Dataset]]$Ensembl_ID %in% Transcription_Factors$Gene_ID == TRUE)
+    
+    genes <- data.frame('Ensembl_ID' = All_DEGs[[Dataset_name]][[Dataset]]$Ensembl, 
+                        'HUGO_IDs' = All_DEGs[[Dataset_name]][[Dataset]]$HUGO_IDs, 
+                        'log2FC' = All_DEGs[[Dataset_name]][[Dataset]]$log2FC,
+                        'adj.P.Val' = All_DEGs[[Dataset_name]][[Dataset]]$adj.P.Val)
+    
+    genes <- data.frame(genes[keep, ])
+    
+    genes
+    
+  })
+  
+  names(TFs) <- c('Upregulated', 'Downregulated')
+  TFs
+  
+})
+
+names(TFs) <- names(All_DEGs)
+```
+
+### Reformat above data
+
+```{r}
+# Function to reformat data for export
+Format_dataset <- function(Dataset, Data_grouping){
+  
+  Formatted_data <- lapply(Data_grouping, function(x){
+    
+    names <- names(Top_pathways[[x]])
+    
+    Formatted_data <- lapply(names, function(y){
+
+      Dataset[[y]]
+
+    })
+    
+    names(Formatted_data) <- names
+    
+    Formatted_data
+    
+  })
+  
+}
+
+All_DEGs <- Format_dataset(Dataset = All_DEGs, Data_grouping = Groupings)
+names(All_DEGs) <- Groupings
+
+Inflammasome <- Format_dataset(Dataset = Inflammasome, Data_grouping = Groupings)
+names(Inflammasome) <- Groupings
+
+TFs <- Format_dataset(Dataset = TFs, Data_grouping = Groupings)
+names(TFs) <- Groupings
+
+All_data <- list(All_DEGs, 
+                 Inflammasome, 
+                 TFs)
+
+names(All_data) <- c('All_DEGs', 
+                     'Inflammasome', 
+                     'TFs')
+```
+
+### Create Euler plots describing overlap of differentially expressed genes between groups
+
+```{r}
+Gene_overlap <- lapply(names(All_data), function(Primary_dataset){
+  
+  Primary_dataset_name <- Primary_dataset
+
+  # Track if overall DEG dataset or other dataset is input
+  # This will control whether euler plots are created
+  ifelse(Primary_dataset_name == 'All_DEGs',
+         Is_All_DEGs <- 'Yes',
+         Is_All_DEGs <- 'No')
+  
+  ####################### Chunk 1: Match up/downregulated genes in comparisons #######################
+   
+  # Rearrange data so up/downregulated data for each subgroup (pol state/method) within
+  # same comparison is within the same sublist for further processing
+  Match_DEG_Directionality <- lapply(All_data[[Primary_dataset]], function(Pol_state_or_method){
+    
+    Pol_state_or_method_names <- names(Pol_state_or_method)
+
+    # Create named lists to store data
+    Upregulated_Ensembl <- vector("list", length(Pol_state_or_method))
+    names(Upregulated_Ensembl) <- Pol_state_or_method_names
+
+    Upregulated_HUGO <- vector("list", length(Pol_state_or_method))
+    names(Upregulated_HUGO) <- Pol_state_or_method_names
+
+    Downregulated_Ensembl <- vector("list", length(Pol_state_or_method))
+    names(Downregulated_Ensembl) <- Pol_state_or_method_names
+
+    Downregulated_HUGO <- vector("list", length(Pol_state_or_method))
+    names(Downregulated_HUGO) <- Pol_state_or_method_names
+    
+    # For each subgroup (pol state/method), save the up/downregulated data
+    # in their respective storage list
+    for(i in 1:length(Pol_state_or_method)){
+
+      Upregulated_Ensembl[[i]] <- Pol_state_or_method[[i]][['Upregulated']]$Ensembl_ID
+      Upregulated_HUGO[[i]] <- Pol_state_or_method[[i]][['Upregulated']]$HUGO_ID
+
+      Downregulated_Ensembl[[i]] <- Pol_state_or_method[[i]][['Downregulated']]$Ensembl_ID
+      Downregulated_HUGO[[i]] <- Pol_state_or_method[[i]][['Downregulated']]$HUGO_ID
+
+    }
+    
+    # Reorganize up/downregulated DEG data into new list and rename to match
+    Match_DEG_Directionality <- list(Upregulated_Ensembl,
+                                     Upregulated_HUGO,
+                                     Downregulated_Ensembl,
+                                     Downregulated_HUGO)
+
+    # Rename elements to match stored data information
+    names(Match_DEG_Directionality) <- c('Upregulated_Ensembl',
+                                         'Upregulated_HUGO',
+                                         'Downregulated_Ensembl',
+                                         'Downregulated_HUGO')
+
+    Match_DEG_Directionality
+    
+  })
+  
+  ####################### Chunk 2: Determine overlapping DEGs between pol groups/methods #######################
+
+  Overlapping_DEGs <- lapply(Groupings, function(Group){
+    
+    Data <- Match_DEG_Directionality[[Group]]
+
+    Overlapping_DEGs <- lapply(c('Up', 'Down'), function(Direction){
+      
+      Up_or_down <- paste0(Direction, 'regulated_Ensembl')
+      Plot_name <- paste0(Direction, 'regulated Genes')
+      
+      Overlapping_DEGs <- lapply(c('regulated_Ensembl', 'regulated_HUGO'), function(x){
+        
+        Gene_type <- paste0(Direction, x)
+
+        ####################### Chunk 3: Create Euler plot determining overlap of all DEGs #######################
+        
+        if(Is_All_DEGs == 'Yes'){
+  
+          # Define colors for euler plots
+          colors <- c('blue3',
+                      'khaki3',
+                      'firebrick3',
+                      'purple3',
+                      'seagreen3',
+                      'darkorange3')
+    
+          # Set group colors
+          col <- colors[1:length(colors)]
+    
+          # Fit the Euler plot using Eulerr package
+          fit <- eulerr::euler(Data[[Up_or_down]])
+          
+          # Create Euler plot
+          fit <- plot(fit,
+                      fills = list(fill = col, alpha = 0.5),
+                      legend = list(side = 'bottom', col = col, text.col = 'black'),
+                      quantities = list(cex = 1.5),
+                      main = paste0(Plot_name),
+                      xlim = c(-15, 15),
+                      ylim = c(-15, 15))
+    
+          # Export as a tiff
+          tiff(paste0(Direction, 'regulated ', Group, ' .tiff'),
+               units = "in",
+               width = 7,
+               height = 5.5,
+               res = 300)
+          print(fit)
+          dev.off()
+          
+        }
+        
+        ####################### Chunk 4: Create data frame containing overlapping information #######################
+        
+        # Defining overlap of genes can be easily done using ggVennDiagram functions
+        Overlap_venn <- ggVennDiagram:::Venn(Data[[Gene_type]]) %>% ggVennDiagram::process_data()
+
+        # Isolate genes unique to each group and combine to one data frame, removing NA values
+        # generated from combining unequal length vectors into one data frame
+        Gene_overlap <- Overlap_venn@region[["item"]]
+        Gene_overlap <- do.call(qpcR:::cbind.na, Gene_overlap) %>% data.frame()
+        Gene_overlap[is.na(Gene_overlap)] <- ''
+
+        # Rename to define overlapping groups
+        names(Gene_overlap) <- Overlap_venn@region[["name"]] %>%
+          gsub(pattern = '..',
+               replacement = '_Overlap_',
+               fixed = TRUE)
+        
+        Gene_overlap
+        
+      })
+      
+      names(Overlapping_DEGs) <- c('Ensembl',
+                                   'HUGO')
+      
+      Overlapping_DEGs
+      
+    })
+    
+    names(Overlapping_DEGs) <- c('Upregulated',
+                                 'Downregulated')
+
+    Overlapping_DEGs
+    
+  })
+  
+  names(Overlapping_DEGs) <- Groupings
+  
+  Overlapping_DEGs
+  
+})
+
+names(Gene_overlap) <- names(All_data)
+```
+
+### Export DE and gene overlap data for Supplemental Files 1-6
+
+```{r}
+Export_data <- lapply(Groupings, function(Individual_Grouping){
+  
+  # Isolate top IPA pathways and DE genes which were included by each group in the IPA analysis
+  Genes_in_IPA_Analysis <- list(IPA_Genes[[Individual_Grouping]])
+  
+  # Reorganize all data for excel file writing
+  Reorganize_data <- lapply(names(All_data), function(Primary_dataset){
+    
+    # All DEGs dataset has DE results, so export the raw DEG results with it
+    if(Primary_dataset == 'All_DEGs'){
+      
+      Raw_DEG_dataset <- lapply(names(Top_pathways[[Individual_Grouping]]), function(DEG_Dataset){
+        
+        Raw_DEG_dataset <- DEG_results[[DEG_Dataset]] %>% rownames_to_column()
+        colnames(Raw_DEG_dataset)[c(1, 6)] <- c('Ensembl_ID', 'HUGO_ID')
+        Raw_DEG_dataset
+
+      })
+      
+      # Match names
+      names(Raw_DEG_dataset) <- names(Top_pathways[[Individual_Grouping]])
+      
+      # Isolate upregulated and downregulated overlapping DE data
+      Overlap_Data_Upregulated <- Gene_overlap[[Primary_dataset]][[Individual_Grouping]][['Upregulated']]
+      Overlap_Data_Downregulated <- Gene_overlap[[Primary_dataset]][[Individual_Grouping]][['Downregulated']]
+
+      # Compile data into one place and set names to match data
+      Reorganize_data <- c(Raw_DEG_dataset, 
+                           Genes_in_IPA_Analysis,
+                           Overlap_Data_Upregulated, 
+                           Overlap_Data_Downregulated) %>% setNames(c(names(Raw_DEG_dataset), 
+                                                                      'IPA_Analyzed_Genes',
+                                                                      paste0(Primary_dataset, '_Upreg_Ensembl'), 
+                                                                      paste0(Primary_dataset, '_Upreg_HUGO'), 
+                                                                      paste0(Primary_dataset, '_Downreg_Ensembl'), 
+                                                                      paste0(Primary_dataset, '_Downreg_HUGO')))
+      
+    }
+    
+    else{
+      
+      # Isolate upregulated and downregulated overlapping DE data
+      Overlap_Data_Upregulated <- Gene_overlap[[Primary_dataset]][[Individual_Grouping]][['Upregulated']]
+      Overlap_Data_Downregulated <- Gene_overlap[[Primary_dataset]][[Individual_Grouping]][['Downregulated']]
+      
+      # Compile data into one place and set names to match data
+      Reorganize_data <- c(Overlap_Data_Upregulated, 
+                           Overlap_Data_Downregulated) %>% setNames(c(paste0(Primary_dataset, '_Upreg_Ensembl'), 
+                                                                      paste0(Primary_dataset, '_Upreg_HUGO'), 
+                                                                      paste0(Primary_dataset, '_Downreg_Ensembl'),
+                                                                      paste0(Primary_dataset, '_Downreg_HUGO')))
+      
+    }
+    
+  })
+
+  # Combine all reorganized data into one place
+  Reorganize_data <- c(Reorganize_data[[1]], 
+                       Reorganize_data[[2]], 
+                       Reorganize_data[[3]])
+  
+  # Create an excel workbook
+  Excel_workbooks <- createWorkbook()
+
+  # Write each group as a separate worksheet and save as an excel file
+  Excel_workbooks <- lapply(names(Reorganize_data), function(Dataset){
+
+    # Add data to a new worksheet
+    addWorksheet(Excel_workbooks,
+                 Dataset)
+
+    # Write new worksheet to created excel file
+    writeDataTable(Excel_workbooks,
+                   Dataset,
+                   x = Reorganize_data[[Dataset]],
+                   rowNames = F)
+
+    # Save the created workbook as a single excel file
+    saveWorkbook(Excel_workbooks,
+                 paste0(Individual_Grouping,
+                        ' DEGs.xlsx'),
+                 overwrite = TRUE)
+
+  })
+})
+```
