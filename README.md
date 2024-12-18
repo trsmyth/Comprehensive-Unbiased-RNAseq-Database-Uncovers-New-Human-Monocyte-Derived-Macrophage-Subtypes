@@ -2,6 +2,8 @@
 
 This repository contains scripts associated with the manuscript "Leveraging a comprehensive unbiased RNAseq database to characterize human monocyte-derived macrophage gene expression profiles within commonly employed in vitro polarization methods" published in Scientific Reports at: https://doi.org/10.1038/s41598-024-78000-6.
 
+Supplemental Figures and Supplemental Files associated with this manuscript are available at: https://doi.org/10.15139/S3/I4EDM7.
+
 Author: Timothy Smyth et al.
 
 These scripts are presented in separate folders corresponding to specific analyses.
